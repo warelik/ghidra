@@ -156,6 +156,207 @@ class SourceTests(unittest.TestCase):
                 with self.subTest(key=key), self.assertRaises(ValueError):
                     release.verify_uploaded_assets(bad, root)
 
+    def test_product_contract_hashes_controller_helpers_fixtures_and_complete_build_job(self):
+        workflow = (
+            "jobs:\n  build:\n    runs-on: ubuntu-24.04\n    steps:\n"
+            "      - name: Build Upstream Container Without Application Patches\n"
+            "        run: python3 scripts/release.py build release\n"
+            "  publish:\n    runs-on: ubuntu-24.04\n")
+        files = {
+            "scripts/release.py": b"import os\ndef main(): return 1\n",
+            "scripts/helper.py": b"def archive_digest(path): return path\n",
+            "scripts/smoke.py": b"def smoke(): return True\n",
+            "scripts/cases/example.json": b'{"project":"fixture"}\n',
+            ".github/workflows/release.yml": workflow.encode(),
+        }
+        tree = "\n".join(
+            f"100644 blob {index:040x}\t{path}"
+            for index, path in enumerate(("scripts/release.py", "scripts/helper.py",
+                                          "scripts/test_policy.py", "scripts/policy_runner.py",
+                                          "scripts/smoke.py"), 1))
+        def git_output(args, **_kwargs):
+            if "--name-only" in args:
+                return "scripts/cases/example.json\n"
+            return tree + "\n"
+
+        def contract_digest():
+            with patch.object(release, "git_commit_file",
+                              side_effect=lambda _commit, path: files[path]), \
+                    patch.object(release.subprocess, "check_output", side_effect=git_output):
+                return release.product_contract_digest(BASE, selected())
+
+        baseline = contract_digest()
+        files["scripts/release.py"] += b"\n# changed main or import-time behavior\n"
+        self.assertNotEqual(baseline, contract_digest())
+        files["scripts/release.py"] = b"import os\ndef main(): return 1\n"
+        files["scripts/helper.py"] += b"\n# changed helper\n"
+        self.assertNotEqual(baseline, contract_digest())
+        files["scripts/helper.py"] = b"def archive_digest(path): return path\n"
+        files["scripts/cases/example.json"] = b'{"project":"changed"}\n'
+        self.assertNotEqual(baseline, contract_digest())
+        files["scripts/cases/example.json"] = b'{"project":"fixture"}\n'
+        files[".github/workflows/release.yml"] = workflow.replace(
+            "runs-on: ubuntu-24.04", "runs-on: ubuntu-22.04", 1).encode()
+        self.assertNotEqual(baseline, contract_digest())
+
+    def test_configuration_preserves_native_default_branch_contract(self):
+        with patch.dict(release.os.environ, {
+                "GITHUB_REPOSITORY": release.REPOSITORY,
+                "GITHUB_SHA": BASE,
+                "CONFIGURATION_SHA": SHA,
+        }), patch.object(release, "api", side_effect=[
+                {"default_branch": "downstream"}, {"sha": SHA}]) as api:
+            self.assertEqual(release.configuration(), (release.REPOSITORY, SHA))
+        self.assertEqual(api.call_args_list[0].args, (f"repos/{release.REPOSITORY}",))
+        self.assertEqual(api.call_args_list[1].args,
+                         (f"repos/{release.REPOSITORY}/commits/downstream",))
+
+    def test_build_configuration_uses_the_checked_out_commit(self):
+        with patch.dict(release.os.environ, {
+                "GITHUB_REPOSITORY": release.REPOSITORY,
+                "GITHUB_SHA": BASE,
+                "CONFIGURATION_SHA": BASE,
+        }), patch.object(release, "run", return_value=BASE) as run, \
+                patch.object(release, "api") as api:
+            self.assertEqual(release.build_configuration(), (release.REPOSITORY, BASE))
+        run.assert_called_once_with("git", "rev-parse", "HEAD", cwd=release.ROOT)
+        api.assert_not_called()
+        with patch.dict(release.os.environ, {
+                "GITHUB_REPOSITORY": release.REPOSITORY,
+                "GITHUB_SHA": BASE,
+                "CONFIGURATION_SHA": SHA,
+        }), patch.object(release, "run", return_value=BASE):
+            with self.assertRaisesRegex(ValueError, "checked-out configuration identity"):
+                release.build_configuration()
+
+    def test_build_cli_retains_native_configuration_preflight(self):
+        events = []
+        with patch.object(release.sys, "argv", ["release.py", "build", "/tmp/release"]), \
+                patch.object(release, "configuration", side_effect=lambda: events.append("preflight")), \
+                patch.object(release, "build", side_effect=lambda path: events.append(path)):
+            release.main()
+        self.assertEqual(events, ["preflight", Path("/tmp/release")])
+
+    def test_prepare_cli_recovers_only_the_exact_latest_published_review_pair(self):
+        class Lifecycle:
+            @staticmethod
+            def candidate_identity(value):
+                return hashlib.sha256(json.dumps(
+                    value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+        source = selected()
+        current_config = BASE
+
+        def candidate_for(config, _selected):
+            return {"schema": 1, "repository": release.REPOSITORY,
+                    "upstream_sha": SHA, "application_sha": SHA,
+                    "configuration_sha": config,
+                    "patchset_sha256": release.EMPTY_PATCHSET,
+                    "recipe_sha256": "c" * 64, "platform": "linux/amd64"}
+
+        previous_release = {"id": 71, "target_commitish": OLD,
+                            "published_at": "2026-10-18T10:00:00Z"}
+        current_release = {
+            "id": 72, "tag_name": release.release_tag(source, current_config),
+            "target_commitish": current_config, "published_at": "2026-10-19T10:00:00Z",
+            "draft": False, "prerelease": False,
+            "body": (f"Exact full review: https://github.com/{release.REPOSITORY}/pull/25; "
+                     f"delta review: https://github.com/{release.REPOSITORY}/pull/26."),
+        }
+        previous_publication = {
+            "release": previous_release, "selected": source,
+            "published_at": release.parse_github_time(previous_release["published_at"], "test time"),
+        }
+        current_publication = {
+            "release": current_release, "selected": source,
+            "published_at": release.parse_github_time(current_release["published_at"], "test time"),
+        }
+        candidate = candidate_for(current_config, source)
+        accepted = {"candidate": candidate, "publication": {"id": current_release["id"]}}
+
+        def marker(scope, review_sha, base_sha):
+            payload = {"schema": 1, "candidate_id": Lifecycle.candidate_identity(candidate),
+                       "scope": scope, "review_sha": review_sha, "base_sha": base_sha}
+            return "<!-- fork-review:v1 " + json.dumps(
+                payload, sort_keys=True, separators=(",", ":")) + " -->"
+
+        def pull(number, scope, review_sha, base_sha):
+            return {
+                "number": number, "state": "open",
+                "head": {"sha": review_sha,
+                         "ref": (f"review/{review_sha}" if scope == "full"
+                                 else f"review/changes-{review_sha}"),
+                         "repo": {"full_name": release.REPOSITORY}},
+                "base": {"sha": base_sha, "ref": f"review-base/{base_sha}",
+                         "repo": {"full_name": release.REPOSITORY}},
+            }
+
+        pulls = {
+            f"repos/{release.REPOSITORY}/pulls/25":
+                pull(25, "full", current_config, release.BASELINE),
+            f"repos/{release.REPOSITORY}/pulls/26":
+                pull(26, "delta", current_config, OLD),
+        }
+        owner = {"login": release.REPOSITORY.split("/", 1)[0], "type": "User"}
+        comments = {
+            25: [{"id": 251, "user": owner, "created_at": WHEN, "updated_at": WHEN,
+                  "body": marker("full", current_config, release.BASELINE)}],
+            26: [{"id": 261, "user": owner, "created_at": WHEN, "updated_at": WHEN,
+                  "body": marker("delta", current_config, OLD)}],
+        }
+
+        def api(route, **_kwargs):
+            if route == f"repos/{release.UPSTREAM}/commits/master":
+                return {"sha": SHA}
+            return pulls[route]
+
+        def pages(route, **_kwargs):
+            if route == f"repos/{release.REPOSITORY}/releases":
+                return [current_release, previous_release]
+            number = int(route.split("/issues/", 1)[1].split("/", 1)[0])
+            return comments[number]
+
+        with tempfile.TemporaryDirectory() as temporary:
+            selection_path = Path(temporary) / "selection.json"
+            output_path = Path(temporary) / "github-output"
+            with patch.dict(release.os.environ, {
+                    "GITHUB_OUTPUT": str(output_path), "GITHUB_RUN_ID": "900",
+                    "GITHUB_RUN_ATTEMPT": "1", "GITHUB_REPOSITORY": release.REPOSITORY,
+                    "GITHUB_SHA": current_config,
+            }), patch.object(release.sys, "argv", ["release.py", "prepare-shared",
+                                                    str(selection_path)]), \
+                    patch.object(release, "enforce_runner_budget"), \
+                    patch.object(release, "configuration", return_value=(release.REPOSITORY,
+                                                                          current_config)), \
+                    patch.object(release, "active_repair", return_value=None), \
+                    patch.object(release, "select_release", return_value=source), \
+                    patch.object(release, "validate_selection"), \
+                    patch.object(release, "pages", side_effect=pages), \
+                    patch.object(release, "verified_publications",
+                                 return_value=[previous_publication, current_publication]), \
+                    patch.object(release, "reconcile_accepted_baseline", return_value=accepted), \
+                    patch.object(release, "api", side_effect=api), \
+                    patch.object(release, "commit_ref", return_value=SHA), \
+                    patch.object(release, "packaging_base"), \
+                    patch.object(release, "verify_remote_release"), \
+                    patch.object(release, "maintenance_candidate", side_effect=candidate_for), \
+                    patch.object(release, "lifecycle", return_value=Lifecycle), \
+                    patch.object(release, "close_review_contexts") as close:
+                release.main()
+
+            close.assert_called_once()
+            recovered = close.call_args.args[0]
+            self.assertEqual([item["scope"] for item in recovered], ["full", "delta"])
+            self.assertEqual([item["pr"] for item in recovered], [25, 26])
+            self.assertEqual([item["request_id"] for item in recovered], [251, 261])
+            self.assertIn("mode=current", output_path.read_text())
+            workflow = (release.ROOT / ".github/workflows/release.yml").read_text()
+            self.assertIn("  schedule:", workflow)
+            self.assertIn("  workflow_dispatch:", workflow)
+            self.assertIn("scripts/release.py prepare-shared", workflow)
+            build_job = workflow.split("\n  build:", 1)[1].split("\n  publish:", 1)[0]
+            self.assertIn("needs.prepare.outputs.mode == 'build'", build_job)
+
 
 class ReviewTests(unittest.TestCase):
     def gate(self, *, reviews=(), inline=(), comments=(), resolve=lambda _: SHA):
@@ -361,8 +562,6 @@ class RepairAndRuntimeTests(unittest.TestCase):
     @patch.object(release, "verified_publication_time",
                   return_value=release.datetime.fromisoformat("2026-01-01T00:00:00+00:00"))
     def test_runner_budget_fails_closed_for_denial_and_malformed_metrics(self, _publication):
-        publication = {"draft": False, "prerelease": False,
-                       "published_at": "2026-01-01T00:00:00Z"}
         request = {"user": {"login": "warelik", "type": "User"},
                    "created_at": "2026-01-01T01:00:00Z",
                    "body": f"<!-- ghidra-fix:{SHA}:1 -->"}
@@ -488,6 +687,47 @@ class RepairAndRuntimeTests(unittest.TestCase):
             release.main()
         budget.assert_called_once_with()
         handler.assert_called_once()
+
+        with patch.object(release.sys, "argv", ["release.py", "build", target]), \
+                patch.object(release, "enforce_runner_budget",
+                             side_effect=ValueError("Cumulative runner budget exhausted")) as budget, \
+                patch.object(release, "configuration") as config, \
+                patch.object(release, "build") as handler, \
+                self.assertRaisesRegex(ValueError, "runner budget exhausted"):
+            release.main()
+        budget.assert_called_once_with(required_remaining=release.BUILD_BUDGET_SECONDS)
+        config.assert_not_called()
+        handler.assert_not_called()
+
+        with patch.object(release.sys, "argv", ["release.py", "build", target]), \
+                patch.object(release, "enforce_runner_budget", return_value=4400) as budget, \
+                patch.object(release, "configuration") as config, \
+                patch.object(release, "build") as handler:
+            release.main()
+        budget.assert_called_once_with(required_remaining=release.BUILD_BUDGET_SECONDS)
+        config.assert_called_once_with()
+        handler.assert_called_once()
+
+    @patch.object(release, "verified_publication_time",
+                  return_value=release.datetime.fromisoformat("2026-01-01T00:00:00+00:00"))
+    def test_runner_budget_reserves_the_entire_final_build_before_authorizing_it(self, _publication):
+        publication = {"draft": False, "prerelease": False,
+                       "published_at": "2026-01-01T00:00:00Z"}
+        request = {"user": {"login": "warelik", "type": "User"},
+                   "created_at": "2026-01-01T01:00:00Z",
+                   "body": f"<!-- ghidra-fix:{SHA}:1 -->"}
+        run = {"id": 10, "run_attempt": 1}
+        job = {"id": 1, "status": "completed", "conclusion": "success",
+               "started_at": "2026-01-01T02:00:00Z",
+               "completed_at": "2026-01-01T03:13:20Z"}
+        # 4,400 seconds were already spent; ordinary preparation fits, but a
+        # complete 3,600-second final build no longer fits in the 8,000-second budget.
+        with patch.object(release, "pages", side_effect=[
+                [request], [run], [job]]):
+            with self.assertRaisesRegex(ValueError, "3600 required"):
+                release.enforce_runner_budget(
+                    release.datetime.fromisoformat("2026-01-01T03:13:20+00:00"),
+                    required_remaining=release.BUILD_BUDGET_SECONDS)
 
     def test_attempt_count_never_replaces_elapsed_budget(self):
         source = selected()
@@ -633,6 +873,19 @@ class RepairAndRuntimeTests(unittest.TestCase):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 release.allowed_repair_paths(changes)
 
+    def test_repair_prompt_uses_json_case_evidence_for_ordinary_repairs(self):
+        state = {"kind": "ordinary", "config": BASE, "upstream": SHA, "head": SHA}
+        prompt = release.repair_prompt(state, 1, "failure evidence")
+        self.assertIn("scripts/cases/new-case.json", prompt)
+        self.assertIn("regression case `new-case-id`", prompt)
+        self.assertIn('regression location `"expect": "exact value"`', prompt)
+        self.assertIn("do not request or describe a Python test", prompt)
+        self.assertNotIn("named regression test whose changed assertion", prompt)
+
+        trusted = release.repair_prompt(
+            {**state, "kind": "trusted"}, 1, "failure evidence")
+        self.assertIn("named regression test whose changed assertion", trusted)
+
     def test_public_untrusted_pull_cannot_inject_repair_state(self):
         pull = {"body": "<!-- ghidra-repair:v1 malicious -->",
                 "user": {"login": "untrusted"}, "head": {"ref": "repair/fake",
@@ -709,6 +962,69 @@ class RepairAndRuntimeTests(unittest.TestCase):
         self.assertIn("needs: [prepare, pending, policy-check, build, publish, land]", workflow)
         self.assertIn("cancel-in-progress: false", workflow)
         self.assertIn("format('ignored-{0}', github.run_id)", workflow)
+        self.assertNotIn("mode == 'policy-current'", policy)
+        policy_finish = workflow.split("\n  policy-finish:", 1)[1].split("\n  repair:", 1)[0]
+        self.assertIn("needs.prepare.outputs.mode == 'policy-current'", policy_finish)
+        self.assertIn("finish-policy-current", policy_finish)
+        repair = workflow.split("\n  repair:", 1)[1]
+        self.assertIn("needs.prepare.outputs.mode != 'policy-current'", repair)
+        build = workflow.split("\n  build:", 1)[1].split("\n  publish:", 1)[0]
+        self.assertIn("permissions:\n      actions: read\n      contents: read\n      issues: read", build)
+        self.assertNotIn("actions: write", build)
+        self.assertNotIn("contents: write", build)
+        self.assertNotIn("issues: write", build)
+        publish = workflow.split("\n  publish:", 1)[1].split("\n  land:", 1)[0]
+        self.assertNotIn("mode == 'policy-current'", build)
+        self.assertNotIn("mode == 'policy-current'", publish)
+        self.assertEqual(workflow.count(
+            "ALLOW_CLOSED_REVIEW: ${{ needs.land.outputs.adopted_sha != '' || "
+            "needs.prepare.outputs.adoption_bridge != '' }}"), 2)
+        download = publish.split("actions/download-artifact@", 1)[1].split("\n      -", 1)[0]
+        self.assertTrue(download.startswith("d3f86a106a0bac45b974a628896c90dbdf5c8093"))
+        self.assertIn("actions: read", publish)
+        self.assertIn("contents: read", publish)
+        self.assertNotIn("contents: write", publish)
+        self.assertNotIn("pull-requests: write", publish)
+        self.assertIn("github-token: ${{ github.token }}", download)
+        self.assertNotIn("CODEX_REQUEST_TOKEN", download)
+
+    def test_workflow_routes_owner_dispositions_and_normalizes_all_private_checkout_keys(self):
+        workflow = (release.ROOT / ".github/workflows/release.yml").read_text()
+        self.assertIn("  issue_comment:\n    types: [created, edited]", workflow)
+        owner_marker = "contains(github.event.comment.body, '<!-- fork-review-disposition:v1')"
+        self.assertEqual(workflow.count(owner_marker), 2)
+        self.assertEqual(workflow.count("python3 scripts/release.py repair-shared"), 2)
+
+        guards = [line for line in workflow.splitlines()
+                  if 'key.lower() == "core.sshcommand"' in line]
+        self.assertEqual(len(guards), 6)
+        self.assertTrue(all('key.lower() == "credential.helper"' in line
+                            and 'key.lower().startswith("http.")' in line
+                            and 'key.lower().endswith(".extraheader")' in line
+                            for line in guards))
+
+        def rejects_git_key(key):
+            lowered = key.lower()
+            return (lowered == "core.sshcommand" or lowered == "credential.helper"
+                    or lowered.startswith("http.") and lowered.endswith(".extraheader"))
+
+        for key in ("core.sshcommand", "core.sshCommand", "credential.helper",
+                    "http.https://example.test/.extraheader"):
+            with self.subTest(key=key):
+                self.assertTrue(rejects_git_key(key))
+        self.assertFalse(rejects_git_key("user.name"))
+
+    def test_public_release_recovery_advances_checkpoint_then_closes_review_pair(self):
+        pair = {"contexts": [{"scope": "full", "pr": 25},
+                             {"scope": "delta", "pr": 26}]}
+        events = []
+        with patch.object(release, "record_accepted_baseline_after_publication",
+                          side_effect=lambda *_args: events.append("checkpoint")), \
+                patch.object(release, "close_review_contexts",
+                             side_effect=lambda contexts: events.append(("close", contexts))):
+            release.recover_published_release(
+                release.REPOSITORY, {"draft": False}, selected(), BASE, pair, 25)
+        self.assertEqual(events, ["checkpoint", ("close", pair["contexts"])])
 
     def test_smoke_contract_contains_real_engine_and_persistence_operations(self):
         smoke = (release.ROOT / "scripts/smoke.py").read_text()
