@@ -2651,11 +2651,14 @@ def require_current_repair_head(state, expected_head):
 
 
 def active_repair(config):
+    matches = []
     for pull in pages(f"repos/{REPOSITORY}/pulls?state=open&base=downstream"):
         state = repair_state(pull)
         if state and state["config"] == config:
-            return state
-    return None
+            matches.append(state)
+    if len(matches) > 1:
+        raise ValueError("Multiple open machine repairs match the current configuration")
+    return matches[0] if matches else None
 
 
 def _native_commit_parent(sha):

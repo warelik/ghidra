@@ -1072,6 +1072,36 @@ class RepairAndRuntimeTests(unittest.TestCase):
                 "repo": {"full_name": "untrusted/fork"}}}
         self.assertIsNone(release.repair_state(pull))
 
+    def test_active_repair_rejects_interrupted_trusted_handoff_in_either_api_order(self):
+        states = [
+            {"schema": 1, "kind": "ordinary", "config": BASE, "seed": OLD,
+             "upstream": SHA, "cycle": "a" * 64},
+            {"schema": 1, "kind": "trusted", "config": BASE, "seed": OLD,
+             "upstream": SHA, "cycle": "a" * 64, "started_at": WHEN},
+        ]
+        pulls = [
+            {"number": index, "user": {"login": "warelik"},
+             "head": {"sha": SHA, "ref": f"repair/{state['kind']}",
+                      "repo": {"full_name": release.REPOSITORY}},
+             "body": "<!-- ghidra-repair:v1 " + json.dumps(state) + " -->"}
+            for index, state in enumerate(states, start=1)
+        ]
+        for ordered in (pulls, list(reversed(pulls))):
+            with self.subTest(order=[pull["number"] for pull in ordered]), \
+                    patch.object(release, "pages", return_value=iter(ordered)) as pages:
+                with self.assertRaisesRegex(ValueError, "Multiple open machine repairs"):
+                    release.active_repair(BASE)
+                pages.assert_called_once_with(
+                    f"repos/{release.REPOSITORY}/pulls?state=open&base=downstream")
+        for pull in pulls:
+            with self.subTest(single=pull["number"]), \
+                    patch.object(release, "pages", return_value=iter([pull])):
+                self.assertEqual(release.active_repair(BASE), release.repair_state(pull))
+        for available in ([], pulls):
+            with self.subTest(no_match=bool(available)), \
+                    patch.object(release, "pages", return_value=iter(available)):
+                self.assertIsNone(release.active_repair(OLD))
+
     def test_land_selectively_adopts_allowed_blobs_without_repair_evidence_or_history(self):
         state = {"number": 6, "head": SHA, "seed": OLD, "config": BASE}
         changed = ["scripts/cases/regression.json"]
