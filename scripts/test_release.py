@@ -1210,7 +1210,7 @@ class RepairAndRuntimeTests(unittest.TestCase):
         self.assertNotIn("actions/checkout@v4", workflow)
         self.assertNotIn("actions/upload-artifact@v4", workflow)
         self.assertEqual(workflow.count(
-            "uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262"), 15)
+            "uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262"), 16)
         self.assertEqual(workflow.count(
             "uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"), 1)
         policy = workflow.split("\n  policy-check:", 1)[1].split("\n  build:", 1)[0]

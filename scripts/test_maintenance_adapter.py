@@ -2216,7 +2216,7 @@ class RepairDispositionProposalTests(unittest.TestCase):
             return comment
 
         def git_command(args, **_kwargs):
-            path = args[-1]
+            path = args[-1].split(":", 1)[-1] if args[1] == "show" else args[-1]
             if args[1] == "ls-tree":
                 blob = "5" * 40 if path == "scripts/release.py" else "6" * 40
                 return f"100644 blob {blob} {path}"
@@ -2409,7 +2409,8 @@ class PrivateSourceAcquisitionFailureTests(unittest.TestCase):
                 "PRIVATE_SOURCE_FAILURE_REASON": "private-repository-checkout",
                 "GITHUB_RUN_ID": "810",
         }, clear=True), \
-                patch.object(release, "configuration", return_value=(release.REPOSITORY, config)), \
+                patch.object(release, "private_source_failure_configuration",
+                             return_value=(release.REPOSITORY, config)), \
                 patch.object(release, "select_release", return_value=source), \
                 patch.object(release, "failed_job_evidence", return_value=original) as failure_evidence, \
                 patch.object(release, "escalation") as escalation, \
