@@ -58,25 +58,94 @@ jobs:
       repair_pr: ${{ steps.select.outputs.repair_pr }}
       repair_head: ${{ steps.select.outputs.repair_head }}
       followup: ${{ steps.select.outputs.followup }}
+      review_pair: ${{ steps.select.outputs.review_pair }}
+      review_state: ${{ steps.select.outputs.review_state }}
+      candidate_source_sha: ${{ steps.select.outputs.candidate_source_sha }}
+      candidate_maintenance_revision: ${{ steps.select.outputs.candidate_maintenance_revision }}
+      candidate_id: ${{ steps.select.outputs.candidate_id }}
+      trusted_maintenance_revision: ${{ steps.private-source.outputs.revision }}
+      reused_run_id: ${{ steps.select.outputs.reused_run_id }}
+      reused_run_attempt: ${{ steps.select.outputs.reused_run_attempt }}
+      authorization_reason: ${{ steps.select.outputs.authorization_reason }}
+      previous_run_id: ${{ steps.select.outputs.previous_run_id }}
+      previous_run_attempt: ${{ steps.select.outputs.previous_run_attempt }}
+      policy_run_id: ${{ steps.select.outputs.policy_run_id }}
+      frozen_candidate: ${{ steps.select.outputs.frozen_candidate }}
+      frozen_run_id: ${{ steps.select.outputs.frozen_run_id }}
+      frozen_run_attempt: ${{ steps.select.outputs.frozen_run_attempt }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Read The Exact Private Maintenance Revision
+        id: private-source
+        run: |
+          python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          lock_path = Path("scripts/maintenance.lock.json")
+          if lock_path.is_symlink() or not lock_path.is_file():
+              raise SystemExit("reviewed private maintenance lock is missing")
+          lock = json.loads(lock_path.read_text())
+          if (set(lock) != {"schema", "repository", "revision", "module_sha256", "api_version"}
+                  or lock.get("schema") != 1 or lock.get("repository") != "warelik/machine-maintenance"
+                  or not re.fullmatch(r"[0-9a-f]{40}", lock.get("revision", ""))
+                  or not re.fullmatch(r"[0-9a-f]{64}", lock.get("module_sha256", ""))
+                  or type(lock.get("api_version")) is not int or lock["api_version"] != 1):
+              raise SystemExit("reviewed private maintenance lock identity is invalid")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"revision={lock['revision']}\n")
+          PY
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: warelik/machine-maintenance
+          ref: ${{ steps.private-source.outputs.revision }}
+          path: maintenance-source
+          ssh-key: ${{ secrets.MAINTENANCE_READ_KEY }}
+          persist-credentials: false
+      - name: Verify Private Checkout Has No Persisted Credential And Record Its Source
+        env:
+          SOURCE_REVISION: ${{ steps.private-source.outputs.revision }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re, subprocess
+          from pathlib import Path
+          root = Path("maintenance-source")
+          config = root / ".git/config"
+          keys = subprocess.run(["git", "config", "--file", str(config), "--name-only", "--list"],
+                                check=True, capture_output=True, text=True).stdout.splitlines()
+          if any(key == "core.sshCommand" or key == "credential.helper"
+                 or key.lower().startswith("http.") and key.lower().endswith(".extraheader") for key in keys):
+              raise SystemExit("private checkout left authentication in git config")
+          revision = os.environ["SOURCE_REVISION"]
+          if not re.fullmatch(r"[0-9a-f]{40}", revision):
+              raise SystemExit("private source revision is malformed")
+          actual = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+                                  check=True, capture_output=True, text=True).stdout.strip()
+          if actual != revision:
+              raise SystemExit("private checkout did not resolve the exact lock revision")
+          (root / ".maintenance-source.json").write_text(json.dumps(
+              {"repository": "warelik/machine-maintenance", "revision": revision},
+              sort_keys=True, separators=(",", ":")))
+          PY
+      - name: Verify The Pinned Shared Policy Before Controller Use
+        env:
+          FORK_MAINTENANCE_ROOT: ${{ github.workspace }}/maintenance-source
+        run: python3 -B -c "import sys; sys.path.insert(0, 'scripts'); from maintenance import load; load()"
       - name: Require Trusted Default Branch
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           test "$GITHUB_REF" = refs/heads/downstream
           test "$DEFAULT_BRANCH" = downstream
-      - name: Test Release Contracts
-        run: python3 -B -m unittest discover -s scripts -p 'test_*.py' -v
       - name: Select One Complete Official Release
         id: select
         env:
           GH_TOKEN: ${{ secrets.CODEX_REQUEST_TOKEN }}
           CODEX_REQUEST_TOKEN: ${{ secrets.CODEX_REQUEST_TOKEN }}
-        run: python3 scripts/release.py prepare "$RUNNER_TEMP/selection.json"
+          FORK_MAINTENANCE_ROOT: ${{ github.workspace }}/maintenance-source
+        run: python3 scripts/release.py prepare-shared "$RUNNER_TEMP/selection.json"
       - name: Report Actual State
         if: always()
         env:
@@ -105,13 +174,25 @@ jobs:
           exit 1
 
   policy-check:
-    name: Check Repair Against Trusted Tests Without Write Credentials
+    name: >-
+      ${{ needs.prepare.outputs.mode == 'policy' && 'Check Ghidra Policy-Only Migration' ||
+          needs.prepare.outputs.mode == 'build' && 'Final Ghidra Policy And Regression Checks' ||
+          'Check Repair Against Trusted Tests Without Write Credentials' }}
     needs: prepare
     if: >-
       needs.prepare.outputs.ready == 'true' &&
-      (needs.prepare.outputs.mode == 'repair' || needs.prepare.outputs.mode == 'trusted')
+      (needs.prepare.outputs.mode == 'build' || needs.prepare.outputs.mode == 'policy' ||
+       needs.prepare.outputs.mode == 'repair' || needs.prepare.outputs.mode == 'trusted')
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    env:
+      CONFIGURATION_SHA: ${{ needs.prepare.outputs.candidate_source_sha }}
+      SELECTED_JSON: ${{ needs.prepare.outputs.selection }}
+      FROZEN_CANDIDATE: ${{ needs.prepare.outputs.frozen_candidate }}
+      FROZEN_CONFIGURATION_SHA: ${{ needs.prepare.outputs.candidate_source_sha }}
+      FROZEN_CANDIDATE_ID: ${{ needs.prepare.outputs.candidate_id }}
+      FROZEN_RUN_ID: ${{ needs.prepare.outputs.frozen_run_id }}
+      FROZEN_RUN_ATTEMPT: ${{ needs.prepare.outputs.frozen_run_attempt }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -123,37 +204,121 @@ jobs:
           ref: ${{ needs.prepare.outputs.repair_head }}
           path: candidate
           persist-credentials: false
+        if: needs.prepare.outputs.mode == 'repair' || needs.prepare.outputs.mode == 'trusted'
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.candidate_source_sha }}
+          path: candidate
+          persist-credentials: false
+        if: needs.prepare.outputs.mode == 'build' || needs.prepare.outputs.mode == 'policy'
+      - name: Read The Candidate's Exact Private Maintenance Revision
+        id: private-source
+        run: |
+          python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          lock_path = Path("candidate/scripts/maintenance.lock.json")
+          if lock_path.is_symlink() or not lock_path.is_file():
+              raise SystemExit("reviewed candidate private maintenance lock is missing")
+          lock = json.loads(lock_path.read_text())
+          if (set(lock) != {"schema", "repository", "revision", "module_sha256", "api_version"}
+                  or type(lock.get("schema")) is not int or lock["schema"] != 1
+                  or lock.get("repository") != "warelik/machine-maintenance"
+                  or not re.fullmatch(r"[0-9a-f]{40}", lock.get("revision", ""))
+                  or not re.fullmatch(r"[0-9a-f]{64}", lock.get("module_sha256", ""))
+                  or type(lock.get("api_version")) is not int or lock["api_version"] != 1):
+              raise SystemExit("reviewed candidate private maintenance lock identity is invalid")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"revision={lock['revision']}\n")
+          PY
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: warelik/machine-maintenance
+          ref: ${{ steps.private-source.outputs.revision }}
+          path: maintenance-source
+          ssh-key: ${{ secrets.MAINTENANCE_READ_KEY }}
+          persist-credentials: false
+      - name: Verify Private Checkout Has No Persisted Credential And Record Its Source
+        env:
+          SOURCE_REVISION: ${{ steps.private-source.outputs.revision }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re, subprocess
+          from pathlib import Path
+          root = Path("maintenance-source")
+          keys = subprocess.run(["git", "config", "--file", str(root / ".git/config"),
+                                 "--name-only", "--list"], check=True, capture_output=True,
+                                text=True).stdout.splitlines()
+          if any(key == "core.sshCommand" or key == "credential.helper"
+                 or key.lower().startswith("http.") and key.lower().endswith(".extraheader") for key in keys):
+              raise SystemExit("private checkout left authentication in git config")
+          revision = os.environ["SOURCE_REVISION"]
+          if not re.fullmatch(r"[0-9a-f]{40}", revision):
+              raise SystemExit("private source revision is malformed")
+          actual = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+                                  check=True, capture_output=True, text=True).stdout.strip()
+          if actual != revision:
+              raise SystemExit("private checkout did not resolve the exact lock revision")
+          (root / ".maintenance-source.json").write_text(json.dumps(
+              {"repository": "warelik/machine-maintenance", "revision": revision},
+              sort_keys=True, separators=(",", ":")))
+          PY
+      - name: Require This Native Attempt's Trusted Freeze Before Policy Tests
+        run: python3 trusted/scripts/release.py check-shared-execution "$GITHUB_WORKSPACE/candidate"
       - name: Run Trusted And Proposed Tests In Read-Only Containers
         env:
-          TRUSTED_UPDATE: ${{ needs.prepare.outputs.mode == 'trusted' }}
+          FORK_MAINTENANCE_ROOT: ${{ github.workspace }}/maintenance-source
         run: python3 trusted/scripts/release.py check-policy "$GITHUB_WORKSPACE/candidate"
 
   build:
     name: Build Official Distribution And Prove PyGhidra Persistence
-    needs: prepare
-    if: needs.prepare.outputs.ready == 'true' && needs.prepare.outputs.mode == 'build'
+    needs: [prepare, policy-check, land]
+    if: >-
+      always() && needs.prepare.outputs.ready == 'true' && needs.policy-check.result == 'success' &&
+      (needs.prepare.outputs.mode == 'build' ||
+       ((needs.prepare.outputs.mode == 'repair' || needs.prepare.outputs.mode == 'trusted') &&
+        needs.land.result == 'success' && needs.land.outputs.final_decision == 'allow'))
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    env:
+      CONFIGURATION_SHA: ${{ needs.land.outputs.adopted_sha || needs.prepare.outputs.candidate_source_sha }}
+      SELECTED_JSON: ${{ needs.prepare.outputs.selection }}
+      FROZEN_CANDIDATE: ${{ needs.land.outputs.final_candidate || needs.prepare.outputs.frozen_candidate }}
+      FROZEN_CONFIGURATION_SHA: ${{ needs.land.outputs.adopted_sha || needs.prepare.outputs.candidate_source_sha }}
+      FROZEN_CANDIDATE_ID: ${{ needs.land.outputs.candidate_id || needs.prepare.outputs.candidate_id }}
+      FROZEN_RUN_ID: ${{ needs.land.outputs.frozen_run_id || needs.prepare.outputs.frozen_run_id }}
+      FROZEN_RUN_ATTEMPT: ${{ needs.land.outputs.frozen_run_attempt || needs.prepare.outputs.frozen_run_attempt }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.land.outputs.adopted_sha || needs.prepare.outputs.candidate_source_sha }}
           persist-credentials: false
+      - name: Require This Native Attempt's Trusted Freeze Before Image Work
+        run: python3 scripts/release.py check-shared-execution "$RUNNER_TEMP/release"
       - name: Build Upstream Container Without Application Patches
         env:
-          GH_TOKEN: ${{ secrets.CODEX_REQUEST_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          CONFIGURATION_SHA: ${{ needs.land.outputs.adopted_sha || needs.prepare.outputs.candidate_source_sha }}
           SELECTED_JSON: ${{ needs.prepare.outputs.selection }}
         run: python3 scripts/release.py build "$RUNNER_TEMP/release"
       - uses: actions/upload-artifact@v4
         with:
-          name: verified-${{ github.sha }}
+          name: verified-${{ needs.land.outputs.adopted_sha || needs.prepare.outputs.candidate_source_sha }}
           path: ${{ runner.temp }}/release/
           if-no-files-found: error
           retention-days: 7
 
   publish:
     name: Recheck Exact Review And Publish Without Deployment
-    needs: [prepare, build]
+    needs: [prepare, policy-check, build, land]
+    if: >-
+      always() && needs.prepare.outputs.ready == 'true' &&
+      ((needs.prepare.outputs.mode == 'build' && needs.policy-check.result == 'success' && needs.build.result == 'success') ||
+       (needs.prepare.outputs.mode == 'reuse') ||
+       ((needs.prepare.outputs.mode == 'repair' || needs.prepare.outputs.mode == 'trusted') &&
+        needs.policy-check.result == 'success' && needs.land.result == 'success' &&
+        (needs.land.outputs.final_decision == 'allow' || needs.land.outputs.final_decision == 'reuse') &&
+        (needs.land.outputs.final_decision == 'reuse' || needs.build.result == 'success')))
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
@@ -162,50 +327,280 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.land.outputs.adopted_sha || needs.prepare.outputs.candidate_source_sha }}
           persist-credentials: false
+      - name: Read Candidate Private Maintenance Revision
+        id: private-source
+        run: |
+          python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          lock = json.loads(Path("scripts/maintenance.lock.json").read_text())
+          if (set(lock) != {"schema", "repository", "revision", "module_sha256", "api_version"}
+                  or type(lock.get("schema")) is not int or lock["schema"] != 1
+                  or lock.get("repository") != "warelik/machine-maintenance"
+                  or not re.fullmatch(r"[0-9a-f]{40}", lock.get("revision", ""))
+                  or not re.fullmatch(r"[0-9a-f]{64}", lock.get("module_sha256", ""))
+                  or type(lock.get("api_version")) is not int or lock["api_version"] != 1):
+              raise SystemExit("candidate private maintenance lock is invalid")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"revision={lock['revision']}\n")
+          PY
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: warelik/machine-maintenance
+          ref: ${{ steps.private-source.outputs.revision }}
+          path: maintenance-source
+          ssh-key: ${{ secrets.MAINTENANCE_READ_KEY }}
+          persist-credentials: false
+      - name: Verify Private Checkout Has No Persisted Credential And Record Its Source
+        env:
+          SOURCE_REVISION: ${{ steps.private-source.outputs.revision }}
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess
+          from pathlib import Path
+          root = Path("maintenance-source")
+          keys = subprocess.run(["git", "config", "--file", str(root / ".git/config"),
+                                 "--name-only", "--list"], check=True, capture_output=True,
+                                text=True).stdout.splitlines()
+          if any(key == "core.sshCommand" or key == "credential.helper"
+                 or key.lower().startswith("http.") and key.lower().endswith(".extraheader") for key in keys):
+              raise SystemExit("private checkout left authentication in git config")
+          revision = os.environ["SOURCE_REVISION"]
+          actual = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+                                  check=True, capture_output=True, text=True).stdout.strip()
+          if actual != revision:
+              raise SystemExit("private checkout did not resolve the exact lock revision")
+          (root / ".maintenance-source.json").write_text(json.dumps(
+              {"repository": "warelik/machine-maintenance", "revision": revision},
+              sort_keys=True, separators=(",", ":")))
+          PY
+      - name: Verify Candidate Shared Policy Before Publishing
+        env:
+          FORK_MAINTENANCE_ROOT: ${{ github.workspace }}/maintenance-source
+        run: python3 -B -c "import sys; sys.path.insert(0, 'scripts'); from maintenance import load; load()"
       - uses: actions/download-artifact@v4
         with:
-          name: verified-${{ github.sha }}
+          name: verified-${{ needs.land.outputs.adopted_sha || needs.prepare.outputs.candidate_source_sha }}
+          run-id: ${{ needs.land.outputs.reused_run_id || needs.prepare.outputs.reused_run_id || github.run_id }}
+          github-token: ${{ secrets.CODEX_REQUEST_TOKEN }}
           path: release
       - name: Publish Only The Tested Image
         env:
           GH_TOKEN: ${{ secrets.CODEX_REQUEST_TOKEN }}
+          CODEX_REQUEST_TOKEN: ${{ secrets.CODEX_REQUEST_TOKEN }}
+          CONFIGURATION_SHA: ${{ needs.land.outputs.adopted_sha || needs.prepare.outputs.candidate_source_sha }}
           SELECTED_JSON: ${{ needs.prepare.outputs.selection }}
+          PREPARE_MODE: ${{ needs.prepare.outputs.mode }}
+          LAND_DECISION: ${{ needs.land.outputs.final_decision }}
+          REUSED_RUN_ID: ${{ needs.land.outputs.reused_run_id || needs.prepare.outputs.reused_run_id }}
+          REUSED_RUN_ATTEMPT: ${{ needs.land.outputs.reused_run_attempt || needs.prepare.outputs.reused_run_attempt }}
           REVIEW_PR: ${{ needs.prepare.outputs.pr }}
           REVIEW_BASE: ${{ needs.prepare.outputs.review_base }}
+          REVIEW_PAIR: ${{ needs.prepare.outputs.review_pair }}
+          REPAIR_PR: ${{ needs.prepare.outputs.repair_pr }}
+          ALLOW_CLOSED_REVIEW: ${{ needs.land.outputs.adopted_sha != '' }}
+          FORK_MAINTENANCE_ROOT: ${{ github.workspace }}/maintenance-source
         run: python3 scripts/release.py publish "$GITHUB_WORKSPACE/release"
 
   land:
-    name: Adopt Only Verified Packaging Changes And Restart Verification
+    name: Adopt Verified Packaging Changes In The Same Run
     needs: [prepare, policy-check]
     if: >-
       needs.prepare.outputs.ready == 'true' &&
       (needs.prepare.outputs.mode == 'repair' || needs.prepare.outputs.mode == 'trusted')
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    outputs:
+      adopted_sha: ${{ steps.land.outputs.adopted_sha }}
+      final_candidate: ${{ steps.land.outputs.final_candidate }}
+      final_decision: ${{ steps.land.outputs.final_decision }}
+      candidate_id: ${{ steps.land.outputs.candidate_id }}
+      frozen_run_id: ${{ steps.land.outputs.frozen_run_id }}
+      frozen_run_attempt: ${{ steps.land.outputs.frozen_run_attempt }}
+      final_reason: ${{ steps.land.outputs.final_reason }}
+      reused_run_id: ${{ steps.land.outputs.reused_run_id }}
+      reused_run_attempt: ${{ steps.land.outputs.reused_run_attempt }}
     permissions:
       contents: write
       pull-requests: write
-      actions: write
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: warelik/machine-maintenance
+          ref: ${{ needs.prepare.outputs.trusted_maintenance_revision }}
+          path: maintenance-source
+          ssh-key: ${{ secrets.MAINTENANCE_READ_KEY }}
+          persist-credentials: false
+      - name: Verify Private Checkout Has No Persisted Credential And Record Its Source
+        env:
+          SOURCE_REVISION: ${{ needs.prepare.outputs.trusted_maintenance_revision }}
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess
+          from pathlib import Path
+          root = Path("maintenance-source")
+          keys = subprocess.run(["git", "config", "--file", str(root / ".git/config"),
+                                 "--name-only", "--list"], check=True, capture_output=True,
+                                text=True).stdout.splitlines()
+          if any(key == "core.sshCommand" or key == "credential.helper"
+                 or key.lower().startswith("http.") and key.lower().endswith(".extraheader") for key in keys):
+              raise SystemExit("private checkout left authentication in git config")
+          revision = os.environ["SOURCE_REVISION"]
+          actual = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+                                  check=True, capture_output=True, text=True).stdout.strip()
+          if actual != revision:
+              raise SystemExit("private checkout did not resolve the exact lock revision")
+          (root / ".maintenance-source.json").write_text(json.dumps(
+              {"repository": "warelik/machine-maintenance", "revision": revision},
+              sort_keys=True, separators=(",", ":")))
+          PY
+      - name: Verify Trusted Shared Policy
+        env:
+          FORK_MAINTENANCE_ROOT: ${{ github.workspace }}/maintenance-source
+        run: python3 -B -c "import sys; sys.path.insert(0, 'scripts'); from maintenance import load; load()"
       - name: Adopt The Exact Reviewed And Tested Repair
+        id: land
         env:
           GH_TOKEN: ${{ secrets.CODEX_REQUEST_TOKEN }}
           CODEX_REQUEST_TOKEN: ${{ secrets.CODEX_REQUEST_TOKEN }}
           REPAIR_PR: ${{ needs.prepare.outputs.repair_pr }}
           REPAIR_HEAD: ${{ needs.prepare.outputs.repair_head }}
-        run: python3 scripts/release.py land "$RUNNER_TEMP/land"
+          REVIEW_PAIR: ${{ needs.prepare.outputs.review_pair }}
+          SELECTED_JSON: ${{ needs.prepare.outputs.selection }}
+          FORK_MAINTENANCE_ROOT: ${{ github.workspace }}/maintenance-source
+        run: python3 scripts/release.py land-shared "$RUNNER_TEMP/land"
+
+  policy-finish:
+    name: Finalize Or Recover Verified Policy-Only State
+    needs: [prepare, policy-check, land]
+    if: >-
+      always() && needs.prepare.outputs.ready == 'true' &&
+      ((needs.policy-check.result == 'success' &&
+        (needs.prepare.outputs.mode == 'policy' || needs.land.outputs.final_decision == 'policy-only')) ||
+       needs.prepare.outputs.mode == 'policy-current')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.land.outputs.adopted_sha || needs.prepare.outputs.candidate_source_sha || github.sha }}
+          persist-credentials: false
+      - name: Read The Exact Candidate Private Maintenance Revision
+        id: private-source
+        run: |
+          python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          lock_path = Path("scripts/maintenance.lock.json")
+          lock = json.loads(lock_path.read_text())
+          if (set(lock) != {"schema", "repository", "revision", "module_sha256", "api_version"}
+                  or type(lock.get("schema")) is not int or lock["schema"] != 1
+                  or lock.get("repository") != "warelik/machine-maintenance"
+                  or not re.fullmatch(r"[0-9a-f]{40}", lock.get("revision", ""))
+                  or not re.fullmatch(r"[0-9a-f]{64}", lock.get("module_sha256", ""))
+                  or type(lock.get("api_version")) is not int or lock["api_version"] != 1):
+              raise SystemExit("candidate private maintenance lock is invalid")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"revision={lock['revision']}\n")
+          PY
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: warelik/machine-maintenance
+          ref: ${{ steps.private-source.outputs.revision }}
+          path: maintenance-source
+          ssh-key: ${{ secrets.MAINTENANCE_READ_KEY }}
+          persist-credentials: false
+      - name: Verify Private Checkout Credentials And Source Identity
+        env:
+          SOURCE_REVISION: ${{ steps.private-source.outputs.revision }}
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess
+          from pathlib import Path
+          root = Path("maintenance-source")
+          keys = subprocess.run(["git", "config", "--file", str(root / ".git/config"),
+                                 "--name-only", "--list"], check=True, capture_output=True,
+                                text=True).stdout.splitlines()
+          if any(key == "core.sshCommand" or key == "credential.helper"
+                 or key.lower().startswith("http.") and key.lower().endswith(".extraheader") for key in keys):
+              raise SystemExit("private checkout left authentication in git config")
+          revision = os.environ["SOURCE_REVISION"]
+          actual = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+                                  check=True, capture_output=True, text=True).stdout.strip()
+          if actual != revision:
+              raise SystemExit("private checkout did not resolve the exact lock revision")
+          (root / ".maintenance-source.json").write_text(json.dumps(
+              {"repository": "warelik/machine-maintenance", "revision": revision},
+              sort_keys=True, separators=(",", ":")))
+          PY
+      - name: Verify Candidate Loader
+        env:
+          FORK_MAINTENANCE_ROOT: ${{ github.workspace }}/maintenance-source
+        run: python3 -B -c "import sys; sys.path.insert(0, 'scripts'); from maintenance import load; load()"
+      - name: Record Successful Policy-Only Migration Without Rebuilding
+        if: needs.prepare.outputs.mode == 'policy' || needs.land.outputs.final_decision == 'policy-only'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CODEX_REQUEST_TOKEN: ${{ secrets.CODEX_REQUEST_TOKEN }}
+          CONFIGURATION_SHA: ${{ needs.land.outputs.adopted_sha || github.sha }}
+          FINAL_CANDIDATE: ${{ needs.land.outputs.final_candidate }}
+          ALLOW_CLOSED_REVIEW: ${{ needs.land.outputs.adopted_sha != '' }}
+          SELECTED_JSON: ${{ needs.prepare.outputs.selection }}
+          REVIEW_PAIR: ${{ needs.prepare.outputs.review_pair }}
+          REPAIR_PR: ${{ needs.prepare.outputs.repair_pr }}
+          FORK_MAINTENANCE_ROOT: ${{ github.workspace }}/maintenance-source
+        run: python3 scripts/release.py complete-policy "$RUNNER_TEMP/policy"
+      - name: Recheck And Close An Already Verified Policy-Only Pair
+        if: needs.prepare.outputs.mode == 'policy-current'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CODEX_REQUEST_TOKEN: ${{ secrets.CODEX_REQUEST_TOKEN }}
+          CONFIGURATION_SHA: ${{ needs.prepare.outputs.candidate_source_sha }}
+          FINAL_CANDIDATE: ${{ needs.prepare.outputs.frozen_candidate }}
+          PREPARE_MODE: ${{ needs.prepare.outputs.mode }}
+          SELECTED_JSON: ${{ needs.prepare.outputs.selection }}
+          REVIEW_PAIR: ${{ needs.prepare.outputs.review_pair }}
+          REPAIR_PR: ${{ needs.prepare.outputs.repair_pr }}
+          ALLOW_CLOSED_REVIEW: "true"
+          FORK_MAINTENANCE_ROOT: ${{ github.workspace }}/maintenance-source
+        run: python3 scripts/release.py finish-policy-current "$RUNNER_TEMP/policy"
+      - name: Request Repair For A Failed Policy Receipt
+        if: failure() && needs.prepare.outputs.mode != 'policy-current'
+        env:
+          GH_TOKEN: ${{ secrets.CODEX_REQUEST_TOKEN }}
+          CODEX_REQUEST_TOKEN: ${{ secrets.CODEX_REQUEST_TOKEN }}
+          CONFIGURATION_SHA: ${{ needs.land.outputs.adopted_sha || github.sha }}
+          SELECTED_JSON: ${{ needs.prepare.outputs.selection }}
+          REVIEW_PAIR: ${{ needs.prepare.outputs.review_pair }}
+          REPAIR_PR: ${{ needs.prepare.outputs.repair_pr }}
+          POLICY_RUN_ID: ${{ needs.prepare.outputs.policy_run_id }}
+          LAND_DECISION: ${{ needs.land.outputs.final_decision }}
+          LAND_REASON: ${{ needs.land.outputs.final_reason }}
+          PREPARE_MODE: ${{ needs.prepare.outputs.mode }}
+          PREPARE_REASON: ${{ needs.prepare.outputs.reason }}
+          PREPARE_PREVIOUS_RUN_ID: ${{ needs.prepare.outputs.previous_run_id }}
+          PREPARE_PREVIOUS_RUN_ATTEMPT: ${{ needs.prepare.outputs.previous_run_attempt }}
+          PREPARE_RESULT: ${{ needs.prepare.result }}
+          POLICY_RESULT: ${{ needs.policy-check.result }}
+          LAND_RESULT: ${{ needs.land.result }}
+          FORK_MAINTENANCE_ROOT: ${{ github.workspace }}/maintenance-source
+        run: python3 scripts/release.py repair-shared "$RUNNER_TEMP/repair"
 
   repair:
     name: Native Codex Repair Or Explicit Bounded Escalation
     needs: [prepare, pending, policy-check, build, publish, land]
     if: >-
       always() &&
+      needs.prepare.outputs.mode != 'policy-current' &&
       (contains(needs.*.result, 'failure') ||
        needs.prepare.outputs.followup == 'true')
     runs-on: ubuntu-24.04
@@ -220,16 +615,58 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: warelik/machine-maintenance
+          ref: ${{ needs.prepare.outputs.trusted_maintenance_revision }}
+          path: maintenance-source
+          ssh-key: ${{ secrets.MAINTENANCE_READ_KEY }}
+          persist-credentials: false
+      - name: Verify Private Checkout Has No Persisted Credential And Record Its Source
+        env:
+          SOURCE_REVISION: ${{ needs.prepare.outputs.trusted_maintenance_revision }}
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess
+          from pathlib import Path
+          root = Path("maintenance-source")
+          keys = subprocess.run(["git", "config", "--file", str(root / ".git/config"),
+                                 "--name-only", "--list"], check=True, capture_output=True,
+                                text=True).stdout.splitlines()
+          if any(key == "core.sshCommand" or key == "credential.helper"
+                 or key.lower().startswith("http.") and key.lower().endswith(".extraheader") for key in keys):
+              raise SystemExit("private checkout left authentication in git config")
+          revision = os.environ["SOURCE_REVISION"]
+          actual = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+                                  check=True, capture_output=True, text=True).stdout.strip()
+          if actual != revision:
+              raise SystemExit("private checkout did not resolve the exact lock revision")
+          (root / ".maintenance-source.json").write_text(json.dumps(
+              {"repository": "warelik/machine-maintenance", "revision": revision},
+              sort_keys=True, separators=(",", ":")))
+          PY
+      - name: Verify Trusted Shared Policy
+        env:
+          FORK_MAINTENANCE_ROOT: ${{ github.workspace }}/maintenance-source
+        run: python3 -B -c "import sys; sys.path.insert(0, 'scripts'); from maintenance import load; load()"
       - name: Request A Real Fix Without Application Patches Or Deployment
         env:
           GH_TOKEN: ${{ secrets.CODEX_REQUEST_TOKEN }}
           CODEX_REQUEST_TOKEN: ${{ secrets.CODEX_REQUEST_TOKEN }}
+          CONFIGURATION_SHA: ${{ needs.land.outputs.adopted_sha || github.sha }}
           SELECTED_JSON: ${{ needs.prepare.outputs.selection }}
           REVIEW_PR: ${{ needs.prepare.outputs.pr }}
-          NONBLOCKING_FOLLOWUP: ${{ !contains(needs.*.result, 'failure') && needs.prepare.outputs.followup == 'true' }}
+          REVIEW_PAIR: ${{ needs.prepare.outputs.review_pair }}
+          REPAIR_PR: ${{ needs.prepare.outputs.repair_pr }}
+          POLICY_RUN_ID: ${{ needs.prepare.outputs.policy_run_id }}
+          LAND_DECISION: ${{ needs.land.outputs.final_decision }}
+          LAND_REASON: ${{ needs.land.outputs.final_reason }}
           PREPARE_MODE: ${{ needs.prepare.outputs.mode }}
           PREPARE_REASON: ${{ needs.prepare.outputs.reason }}
+          PREPARE_PREVIOUS_RUN_ID: ${{ needs.prepare.outputs.previous_run_id }}
+          PREPARE_PREVIOUS_RUN_ATTEMPT: ${{ needs.prepare.outputs.previous_run_attempt }}
           PREPARE_RESULT: ${{ needs.prepare.result }}
           POLICY_RESULT: ${{ needs.policy-check.result }}
           LAND_RESULT: ${{ needs.land.result }}
-        run: python3 scripts/release.py repair "$RUNNER_TEMP/repair"
+          FORK_MAINTENANCE_ROOT: ${{ github.workspace }}/maintenance-source
+        run: python3 scripts/release.py repair-shared "$RUNNER_TEMP/repair"

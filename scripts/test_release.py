@@ -709,6 +709,16 @@ class RepairAndRuntimeTests(unittest.TestCase):
         self.assertIn("needs: [prepare, pending, policy-check, build, publish, land]", workflow)
         self.assertIn("cancel-in-progress: false", workflow)
         self.assertIn("format('ignored-{0}', github.run_id)", workflow)
+        self.assertNotIn("mode == 'policy-current'", policy)
+        policy_finish = workflow.split("\n  policy-finish:", 1)[1].split("\n  repair:", 1)[0]
+        self.assertIn("needs.prepare.outputs.mode == 'policy-current'", policy_finish)
+        self.assertIn("finish-policy-current", policy_finish)
+        repair = workflow.split("\n  repair:", 1)[1]
+        self.assertIn("needs.prepare.outputs.mode != 'policy-current'", repair)
+        build = workflow.split("\n  build:", 1)[1].split("\n  publish:", 1)[0]
+        publish = workflow.split("\n  publish:", 1)[1].split("\n  land:", 1)[0]
+        self.assertNotIn("mode == 'policy-current'", build)
+        self.assertNotIn("mode == 'policy-current'", publish)
 
     def test_smoke_contract_contains_real_engine_and_persistence_operations(self):
         smoke = (release.ROOT / "scripts/smoke.py").read_text()
