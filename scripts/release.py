@@ -2543,6 +2543,13 @@ def enforce_runner_budget(now=None, *, required_remaining=0):
         run_id, attempts = workflow_run.get("id"), workflow_run.get("run_attempt")
         if not isinstance(run_id, int) or run_id <= 0 or not isinstance(attempts, int) or attempts <= 0:
             raise ValueError("Missing or malformed GitHub Actions run identity")
+        if workflow_run.get("status") == "completed" and workflow_run.get("updated_at") is not None:
+            updated = parse_github_time(workflow_run["updated_at"], "workflow-run updated_at")
+            # Old runs may be rerun in the active window; their latest update,
+            # rather than creation, determines whether their jobs can matter.
+            # Retain the documented one-second cancellation-clock boundary.
+            if updated < started - timedelta(seconds=1):
+                continue
         for attempt in range(1, attempts + 1):
             endpoint = f"repos/{REPOSITORY}/actions/runs/{run_id}/attempts/{attempt}/jobs"
             for job in pages(endpoint, list_field="jobs"):

@@ -710,6 +710,51 @@ class RepairAndRuntimeTests(unittest.TestCase):
 
     @patch.object(release, "verified_publication_time",
                   return_value=release.datetime.fromisoformat("2026-01-01T00:00:00+00:00"))
+    def test_runner_budget_skips_finished_history_but_keeps_reruns_active_and_boundary_jobs(self, _publication):
+        request = {"user": {"login": "warelik", "type": "User"},
+                   "created_at": "2026-01-01T01:00:00Z", "body": f"<!-- ghidra-fix:{SHA}:1 -->"}
+        runs = [
+            {"id": 9, "run_attempt": 99, "status": "completed", "updated_at": "2026-01-01T00:30:00Z"},
+            {"id": 10, "run_attempt": 2, "status": "completed",
+             "created_at": "2025-12-31T00:00:00Z", "updated_at": "2026-01-01T01:11:00Z"},
+            {"id": 11, "run_attempt": 1, "status": "in_progress", "updated_at": "2025-12-31T00:00:00Z"},
+            {"id": 12, "run_attempt": 1, "status": "completed", "updated_at": "2026-01-01T00:59:59Z"},
+            {"id": 13, "run_attempt": 1},
+        ]
+        job_rows = {
+            (10, 1): [{"id": 1, "status": "completed", "conclusion": "failure",
+                       "started_at": "2026-01-01T00:40:00Z", "completed_at": "2026-01-01T00:50:00Z"}],
+            (10, 2): [{"id": 2, "status": "completed", "conclusion": "success",
+                       "started_at": "2026-01-01T01:05:00Z", "completed_at": "2026-01-01T01:10:00Z"}],
+            (11, 1): [{"id": 3, "status": "in_progress", "conclusion": None,
+                       "started_at": "2026-01-01T00:59:00Z", "completed_at": None}],
+            (12, 1): [{"id": 4, "status": "completed", "conclusion": "cancelled",
+                       "started_at": "2026-01-01T01:00:00Z", "completed_at": "2026-01-01T00:59:59Z"}],
+            (13, 1): [{"id": 5, "status": "completed", "conclusion": "success",
+                       "started_at": "2026-01-01T00:59:00Z", "completed_at": "2026-01-01T01:01:00Z"}],
+        }
+        calls = []
+
+        def pages(endpoint, **_kwargs):
+            calls.append(endpoint)
+            if endpoint.endswith("/releases"):
+                return []
+            if "/issues/comments?" in endpoint:
+                return [request]
+            if endpoint.endswith("/release.yml/runs"):
+                return runs
+            suffix = endpoint.split("/actions/runs/", 1)[1].split("/")
+            run_id, attempt = int(suffix[0]), int(suffix[2])
+            self.assertNotEqual(run_id, 9, "Finished pre-window runs must not trigger jobs requests")
+            return job_rows[(run_id, attempt)]
+
+        now = release.datetime.fromisoformat("2026-01-01T01:20:00+00:00")
+        with patch.object(release, "pages", side_effect=pages):
+            self.assertEqual(release.enforce_runner_budget(now), 1561)
+        self.assertEqual(sum("/attempts/" in endpoint for endpoint in calls), 5)
+
+    @patch.object(release, "verified_publication_time",
+                  return_value=release.datetime.fromisoformat("2026-01-01T00:00:00+00:00"))
     def test_runner_budget_fails_closed_for_denial_and_malformed_metrics(self, _publication):
         publication = {"draft": False, "prerelease": False,
                        "published_at": "2026-01-01T00:00:00Z"}
