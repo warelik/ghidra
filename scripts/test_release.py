@@ -699,16 +699,65 @@ class RepairAndRuntimeTests(unittest.TestCase):
 
     def test_workflow_keeps_untrusted_code_in_read_only_job(self):
         workflow = (release.ROOT / ".github/workflows/release.yml").read_text()
+        self.assertNotIn("actions/checkout@v4", workflow)
+        self.assertNotIn("actions/upload-artifact@v4", workflow)
+        self.assertEqual(workflow.count(
+            "uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262"), 15)
+        self.assertEqual(workflow.count(
+            "uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"), 1)
         policy = workflow.split("\n  policy-check:", 1)[1].split("\n  build:", 1)[0]
         self.assertNotIn("CODEX_REQUEST_TOKEN", policy)
         self.assertNotIn("contents: write", policy)
         self.assertEqual(workflow.count("GH_TOKEN: ${{ secrets.CODEX_REQUEST_TOKEN }}"), 5)
         self.assertIn("persist-credentials: false", policy)
         self.assertIn("trusted/scripts/release.py check-policy", policy)
+        verify_shared_policy = policy.split(
+            "name: Verify The Pinned Shared Policy Before Policy Tests", 1)[1].split("\n      -", 1)[0]
+        self.assertIn("from maintenance import load", verify_shared_policy)
+        self.assertIn("load(Path('candidate/scripts/maintenance.lock.json'))", verify_shared_policy)
+        self.assertNotIn("load()", verify_shared_policy)
         self.assertIn("needs: [prepare, policy-check]", workflow)
-        self.assertIn("needs: [prepare, pending, policy-check, build, publish, land]", workflow)
+        self.assertIn("needs: [prepare, pending, policy-check, build, publish, land, policy-finish]", workflow)
         self.assertIn("cancel-in-progress: false", workflow)
         self.assertIn("format('ignored-{0}', github.run_id)", workflow)
+        self.assertNotIn("mode == 'policy-current'", policy)
+        policy_finish = workflow.split("\n  policy-finish:", 1)[1].split("\n  repair:", 1)[0]
+        self.assertIn("needs.prepare.outputs.mode == 'policy-current'", policy_finish)
+        self.assertIn("finish-policy-current", policy_finish)
+        repair = workflow.split("\n  repair:", 1)[1]
+        self.assertIn("needs.prepare.outputs.mode != 'policy-current'", repair)
+        self.assertIn("contains(needs.*.result, 'failure')", repair)
+        build = workflow.split("\n  build:", 1)[1].split("\n  publish:", 1)[0]
+        self.assertIn("mode == 'build-policy-current'", build)
+        self.assertIn("policy_verified == 'true'", build)
+        self.assertIn("policy_verified != 'true'", policy)
+        preflight = build.split("name: Require This Native Attempt's Trusted Freeze Before Image Work", 1)[1].split(
+            "\n      -", 1)[0]
+        self.assertIn("GH_TOKEN: ${{ github.token }}", preflight)
+        self.assertNotIn("CODEX_REQUEST_TOKEN", preflight)
+        self.assertNotIn("MAINTENANCE_READ_KEY", preflight)
+        self.assertNotIn("FORK_MAINTENANCE_ROOT", preflight)
+        self.assertIn("check-shared-execution", preflight)
+        self.assertIn("permissions:\n      actions: read\n      contents: read\n      issues: read", build)
+        self.assertNotIn("actions: write", build)
+        self.assertNotIn("contents: write", build)
+        self.assertNotIn("issues: write", build)
+        publish = workflow.split("\n  publish:", 1)[1].split("\n  land:", 1)[0]
+        self.assertIn("mode == 'build-policy-current'", publish)
+        self.assertIn("policy_verified == 'true'", publish)
+        self.assertNotIn("mode == 'policy-current'", build)
+        self.assertNotIn("mode == 'policy-current'", publish)
+        self.assertEqual(workflow.count(
+            "ALLOW_CLOSED_REVIEW: ${{ needs.land.outputs.adopted_sha != '' || "
+            "needs.prepare.outputs.adoption_bridge != '' }}"), 2)
+        download = publish.split("actions/download-artifact@", 1)[1].split("\n      -", 1)[0]
+        self.assertTrue(download.startswith("d3f86a106a0bac45b974a628896c90dbdf5c8093"))
+        self.assertIn("actions: read", publish)
+        self.assertIn("contents: read", publish)
+        self.assertNotIn("contents: write", publish)
+        self.assertNotIn("pull-requests: write", publish)
+        self.assertIn("github-token: ${{ github.token }}", download)
+        self.assertNotIn("CODEX_REQUEST_TOKEN", download)
 
     def test_smoke_contract_contains_real_engine_and_persistence_operations(self):
         smoke = (release.ROOT / "scripts/smoke.py").read_text()
