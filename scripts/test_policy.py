@@ -57,6 +57,12 @@ class DeclarativePolicyTests(unittest.TestCase):
             with self.subTest(path=path), self.assertRaises(ValueError):
                 release.allowed_trusted_paths({path: "100644"})
 
+    def test_policy_orchestration_is_never_selected_from_the_candidate(self):
+        import inspect
+        source = inspect.getsource(release.check_policy)
+        self.assertIn("source = ROOT", source)
+        self.assertNotIn("TRUSTED_UPDATE", source)
+
     def test_data_only_attempt_routes_to_separate_trusted_pr(self):
         state = {"schema": 1, "config": "a" * 40, "seed": "b" * 40,
                  "upstream": "c" * 40, "upstream_release_id": 7, "cycle": "d" * 64,
