@@ -566,7 +566,9 @@ class RepairAndRuntimeTests(unittest.TestCase):
         release.allowed_repair_paths({"scripts/release.py": "100644", "scripts/test_new.py": "100644"})
         for changes in ({}, {"Ghidra/application.properties": "100644"},
                         {"docker/Dockerfile": "100644"}, {"AGENTS.md": "100644"},
-                        {"scripts/test_release.py": None}, {"scripts/release.py": "120000"},
+                        {"scripts/test_release.py": None},
+                        {"scripts/test_policy_supervisor.py": "100644"},
+                        {"scripts/release.py": "120000"},
                         {".repair/failure.txt": "100644"}):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 release.allowed_repair_paths(changes)

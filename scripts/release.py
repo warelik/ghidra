@@ -459,6 +459,8 @@ def allowed_repair_paths(changes):
     if not changes:
         raise ValueError("Repair has no implementation changes")
     for path, mode in changes.items():
+        if path == "scripts/test_policy_supervisor.py":
+            raise ValueError("The trusted policy supervisor is not repairable")
         if (path not in allowed and not re.fullmatch(r"scripts/test_[A-Za-z0-9_]+\.py", path)
                 or mode != "100644"):
             raise ValueError(f"Repair must preserve regular packaging/test files only: {path}")
@@ -914,9 +916,12 @@ def request_repair(path):
 
 
 def check_policy(candidate):
-    for tests in (ROOT / "scripts", candidate / "scripts"):
+    supervisor = ROOT / "scripts/test_policy_supervisor.py"
+
+    def isolated_run(mode, tests, case=None):
         with tempfile.TemporaryDirectory(prefix="ghidra-policy-oracle-") as oracle_temp, \
-                tempfile.TemporaryDirectory(prefix="ghidra-policy-worker-") as worker_temp:
+                tempfile.TemporaryDirectory(prefix="ghidra-policy-worker-") as worker_temp, \
+                tempfile.TemporaryDirectory(prefix="ghidra-policy-data-") as data_temp:
             # Two containers give the candidate a distinct PID namespace.  It cannot ptrace or
             # signal the trusted unittest process even though both use the invoking uid.  The only
             # shared state is a pair of anonymous JSON pipes created by this trusted supervisor.
@@ -929,21 +934,25 @@ def check_policy(candidate):
             mounts = []
             for source in dict.fromkeys((ROOT.resolve(), candidate.resolve())):
                 mounts += ["--mount", f"type=bind,source={source},target={source},readonly"]
-            supervisor = ROOT / "scripts/test_policy_supervisor.py"
             worker_command = common + ["--workdir", worker_temp, "--env", f"HOME={worker_temp}",
-                                       "--env", f"TMPDIR={worker_temp}"] + mounts + [
-                "--mount", f"type=bind,source={worker_temp},target={worker_temp}", POLICY_IMAGE,
+                                       "--env", f"TMPDIR={data_temp}"] + mounts + [
+                "--mount", f"type=bind,source={worker_temp},target={worker_temp}",
+                "--mount", f"type=bind,source={data_temp},target={data_temp}", POLICY_IMAGE,
                 "python3", "-B", str(supervisor), "worker", str(candidate / "scripts")]
             oracle_command = common + ["--workdir", oracle_temp, "--env", f"HOME={oracle_temp}",
-                                       "--env", f"TMPDIR={oracle_temp}"] + mounts + [
-                "--mount", f"type=bind,source={oracle_temp},target={oracle_temp}", POLICY_IMAGE,
-                "python3", "-B", str(supervisor), "oracle", str(candidate / "scripts"), str(tests)]
+                                       "--env", f"TMPDIR={data_temp}"] + mounts + [
+                "--mount", f"type=bind,source={oracle_temp},target={oracle_temp}",
+                "--mount", f"type=bind,source={data_temp},target={data_temp}", POLICY_IMAGE,
+                "python3", "-B", str(supervisor), mode, str(candidate / "scripts"), str(tests)]
+            if case:
+                oracle_command.append(case)
             worker = subprocess.Popen(worker_command, stdin=worker_read, stdout=worker_write)
             oracle = subprocess.Popen(oracle_command, stdin=oracle_read, stdout=oracle_write)
             for descriptor in (oracle_read, oracle_write, worker_read, worker_write):
                 os.close(descriptor)
             try:
-                if oracle.wait(timeout=300):
+                expected = 73 if mode == "case" else 0
+                if oracle.wait(timeout=300) != expected:
                     raise subprocess.CalledProcessError(oracle.returncode, oracle_command)
             finally:
                 worker.terminate()
@@ -952,6 +961,15 @@ def check_policy(candidate):
                 except subprocess.TimeoutExpired:
                     worker.kill()
                     worker.wait()
+    # The immutable baseline is discovered and executed only by the trusted oracle.
+    isolated_run("oracle", ROOT / "scripts")
+    # Candidate test source is parsed, never imported, while constructing the inventory.
+    inventory = json.loads(run("python3", "-B", str(supervisor), "inventory",
+                               str(candidate / "scripts"), cwd=ROOT))
+    if not inventory or not all(isinstance(case, str) for case in inventory):
+        raise ValueError("Proposed test inventory is empty or malformed")
+    for case in inventory:
+        isolated_run("case", candidate / "scripts", case)
     with tempfile.TemporaryDirectory(prefix="ghidra-actionlint-") as temporary:
         url = ("https://github.com/rhysd/actionlint/releases/download/v1.7.12/"
                "actionlint_1.7.12_linux_amd64.tar.gz")
