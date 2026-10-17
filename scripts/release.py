@@ -245,7 +245,11 @@ def review_gate(sha, requested_at, reviews, inline, comments, resolve):
         latest = max(submitted, key=lambda r: (r.get("submitted_at") or "", r.get("id", 0)))
         if latest.get("state") not in {"APPROVED", "COMMENTED"}:
             return False, "Latest exact-SHA Codex review is not positive"
-        if (latest["state"] == "APPROVED" or CLEAN.search(latest.get("body") or "")
+        body = latest.get("body") or ""
+        minor_review = (latest["state"] == "COMMENTED"
+                        and "<!-- codex-code-review-finding:v1 -->" in body
+                        and MINOR.search(body) and not SEVERITY.search(body))
+        if (latest["state"] == "APPROVED" or CLEAN.search(body) or minor_review
                 or any(c.get("pull_request_review_id") == latest.get("id")
                        for c in evidence if c in inline)):
             return True, "Completed exact-SHA Codex review"
@@ -397,18 +401,22 @@ def enforce_runner_budget(now=None):
             completed = now
         else:
             raise ValueError("Missing or malformed GitHub Actions job status")
+        cancelled_inversion = False
         if completed < job_started:
             # GitHub can report a cancelled job as starting one second after
             # completion. Charge a full second rather than dropping it.
             if (job.get("conclusion") == "cancelled" and
-                    (job_started - completed).total_seconds() <= 1):
+                    job_started - completed == timedelta(seconds=1)):
                 completed = job_started + timedelta(seconds=1)
+                cancelled_inversion = True
             else:
                 raise ValueError("Malformed GitHub Actions job timestamps")
         if job_started > now:
             raise ValueError("Malformed GitHub Actions job timestamps")
         begin, end = max(job_started, started), min(completed, now)
-        if end > begin:
+        if cancelled_inversion and completed > started:
+            consumed += 1
+        elif end > begin:
             consumed += (end - begin).total_seconds()
     if consumed >= RUNNER_BUDGET_SECONDS:
         raise ValueError(f"Cumulative runner budget exhausted ({int(consumed)} seconds)")
@@ -416,8 +424,12 @@ def enforce_runner_budget(now=None):
 
 
 def minor_findings(pr, sha):
-    return [r for r in pages(f"repos/{REPOSITORY}/pulls/{pr}/comments")
-            if actor(r) and inline_source(r) == sha and MINOR.search(r.get("body") or "")]
+    inline = [r for r in pages(f"repos/{REPOSITORY}/pulls/{pr}/comments")
+              if actor(r) and inline_source(r) == sha and MINOR.search(r.get("body") or "")]
+    general = [r for r in pages(f"repos/{REPOSITORY}/pulls/{pr}/reviews")
+               if (actor(r) and r.get("commit_id") == sha
+                   and MINOR.search(r.get("body") or ""))]
+    return inline + general
 
 
 def repair_state(pull):

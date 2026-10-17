@@ -175,6 +175,14 @@ class ReviewTests(unittest.TestCase):
         self.assertTrue(self.gate(reviews=[self.approved()])[0])
         self.assertTrue(self.gate(comments=[self.native()])[0])
 
+    def test_exact_review_body_with_only_p2_is_nonblocking(self):
+        review = {"user": BOT, "performed_via_github_app": APP,
+                  "commit_id": SHA, "state": "COMMENTED", "submitted_at": WHEN,
+                  "id": 17, "body": "<!-- codex-code-review-finding:v1 -->\n[P2] Follow-up"}
+        self.assertTrue(self.gate(reviews=[review])[0])
+        self.assertFalse(self.gate(reviews=[{**review, "body": "[P2] No authenticated finding marker"}])[0])
+        self.assertFalse(self.gate(reviews=[{**review, "body": review["body"].replace("P2", "P1")}])[0])
+
     def test_reactions_reports_stale_reviews_and_spoofed_actors_fail(self):
         self.assertFalse(self.gate()[0])
         cases = [self.approved(commit_id=BASE),
@@ -230,8 +238,12 @@ class ReviewTests(unittest.TestCase):
                    "body": "[P3] Current follow-up"}
         fallback = {"user": BOT, "commit_id": SHA, "original_commit_id": "malformed",
                     "body": "[P2] Conservative follow-up"}
-        with patch.object(release, "pages", return_value=[stale, current, fallback]):
-            self.assertEqual(release.minor_findings(9, SHA), [current, fallback])
+        general = {"user": BOT, "performed_via_github_app": APP,
+                   "commit_id": SHA, "state": "COMMENTED", "body": "[P2] General finding"}
+        def records(endpoint):
+            return [stale, current, fallback] if endpoint.endswith("/comments") else [general]
+        with patch.object(release, "pages", side_effect=records):
+            self.assertEqual(release.minor_findings(9, SHA), [current, fallback, general])
 
     def test_incomplete_ambiguous_or_stale_completion_does_not_pass(self):
         for state in ({"commit_sha": BASE, "status": "completed", "has_any_findings": False,
@@ -362,11 +374,17 @@ class RepairAndRuntimeTests(unittest.TestCase):
                 [publication], [request], [run], [cancelled]]):
             self.assertEqual(release.enforce_runner_budget(now), 1)
         for job in ({**cancelled, "conclusion": "success"},
-                    {**cancelled, "completed_at": "2026-01-01T00:59:59Z"}):
+                    {**cancelled, "completed_at": "2026-01-01T00:59:59Z"},
+                    {**cancelled, "started_at": "2026-01-01T01:00:01.500Z",
+                     "completed_at": "2026-01-01T01:00:01Z"}):
             with self.subTest(job=job), patch.object(release, "pages", side_effect=[
                     [publication], [request], [run], [job]]), \
                     self.assertRaisesRegex(ValueError, "Malformed GitHub Actions job timestamps"):
                 release.enforce_runner_budget(now)
+        scan_boundary = release.datetime.fromisoformat("2026-01-01T01:00:01.200+00:00")
+        with patch.object(release, "pages", side_effect=[
+                [publication], [request], [run], [cancelled]]):
+            self.assertEqual(release.enforce_runner_budget(scan_boundary), 1)
 
     def test_runner_budget_accounts_for_jobs_started_during_api_walk(self):
         publication = {"draft": False, "prerelease": False,
