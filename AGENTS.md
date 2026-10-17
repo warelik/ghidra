@@ -35,9 +35,10 @@ isolation or publication controls to make a build pass.
 Test proposed repairs without write credentials, against both the trusted and
 proposed tests. Recheck exact-SHA review and selectively adopt only the verified
 packaging/test files; never merge `.repair/` evidence into the default branch.
-The adopted configuration requires a fresh review and build. Bound coding
-attempts and elapsed time. Preserve the last verified release and escalate a
-real access boundary or exhausted repair through an existing GitHub issue with
+The adopted configuration requires a fresh review and build. Bound repair by
+elapsed time and resource budgets; reaching a check or attempt count alone is
+not a reason to stop or escalate. Preserve the last verified release and escalate
+a real access boundary or exhausted repair through an existing GitHub issue with
 evidence, attempted actions and remaining tradeoffs.
 
 GitHub never deploys to a VPS and has no VPS credentials. Preserve user projects,
