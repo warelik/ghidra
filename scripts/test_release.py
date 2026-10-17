@@ -527,11 +527,13 @@ class RepairAndRuntimeTests(unittest.TestCase):
         self.assertIsNotNone(release.coding_boundary([
             new_request, {**older_error, "created_at": "2026-01-01T00:00:02Z"}]))
 
-    def test_repair_never_changes_application_or_removes_tests(self):
-        release.allowed_repair_paths({"scripts/release.py": "100644", "scripts/test_new.py": "100644"})
+    def test_repair_never_changes_application_or_trusted_tests(self):
+        release.allowed_repair_paths({"scripts/release.py": "100644",
+                                      "scripts/cases/regression-1.json": "100644"})
         for changes in ({}, {"Ghidra/application.properties": "100644"},
                         {"docker/Dockerfile": "100644"}, {"AGENTS.md": "100644"},
-                        {"scripts/test_release.py": None}, {"scripts/release.py": "120000"},
+                        {"scripts/test_new.py": "100644"}, {"scripts/test_release.py": None},
+                        {"scripts/cases/bad.py": "100644"}, {"scripts/release.py": "120000"},
                         {".repair/failure.txt": "100644"}):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 release.allowed_repair_paths(changes)
@@ -545,7 +547,7 @@ class RepairAndRuntimeTests(unittest.TestCase):
     def test_land_selectively_adopts_allowed_blobs_without_repair_evidence_or_history(self):
         state = {"number": 6, "head": SHA, "seed": OLD, "config": BASE}
         changed = [".github/workflows/release.yml", "scripts/release.py",
-                   "scripts/test_release.py"]
+                   "scripts/cases/regression.json"]
         blobs = {name: f"blob-{index}" for index, name in enumerate(changed)}
 
         def git_boundary(*args, **_kwargs):

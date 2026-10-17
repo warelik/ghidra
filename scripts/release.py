@@ -449,7 +449,7 @@ def allowed_repair_paths(changes):
     if not changes:
         raise ValueError("Repair has no implementation changes")
     for path, mode in changes.items():
-        if (path not in allowed and not re.fullmatch(r"scripts/test_[A-Za-z0-9_]+\.py", path)
+        if (path not in allowed and not re.fullmatch(r"scripts/cases/[A-Za-z0-9_-]+\.json", path)
                 or mode != "100644"):
             raise ValueError(f"Repair must preserve regular packaging/test files only: {path}")
 
@@ -766,8 +766,10 @@ def repair_prompt(state, attempt, evidence):
         f"Trusted packaging configuration `{state['config']}`; exact official Ghidra "
         f"`{UPSTREAM}@{state['upstream']}`. This is a coding task, not a review. "
         "The official application has NO patches and must remain unmodified. "
-        "Repair only scripts/release.py, scripts/smoke.py, scripts/test_*.py or "
-        ".github/workflows/release.yml. Do not change AGENTS.md or application sources. "
+        "Repair only scripts/release.py, scripts/smoke.py, declarative scripts/cases/*.json or "
+        ".github/workflows/release.yml. Proposed cases may contain only literal call arguments "
+        "and expected JSON values or named ValueError/TypeError outcomes. Do not change "
+        "AGENTS.md, trusted Python tests/supervisor, or application sources. "
         "Use the existing native GitHub workflow, not a new controller or queue. "
         "Preserve stable-source identity, official SHA-256 verification, read-only credential-free "
         "repair tests, exact-SHA Codex review, P0/P1 blocking and P2/P3 follow-up, provenance, "
@@ -904,22 +906,51 @@ def request_repair(path):
 
 
 def check_policy(candidate):
-    launcher = ("import sys,unittest;sys.path.insert(0,sys.argv[1]);import release;"
-                "suite=unittest.defaultTestLoader.discover(sys.argv[2],pattern='test_*.py');"
-                "sys.exit(not unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful())")
-    for tests in (ROOT / "scripts", candidate / "scripts"):
-        with tempfile.TemporaryDirectory(prefix="ghidra-policy-tests-") as temporary:
-            root = Path(temporary)
-            command = ["docker", "run", "--rm", "--read-only", "--network=none", "--cap-drop=ALL",
-                       "--security-opt=no-new-privileges", "--memory=1g", "--cpus=2", "--pids-limit=256",
-                       "--user", f"{os.getuid()}:{os.getgid()}", "--workdir", str(root),
-                       "--env", f"HOME={root}", "--env", f"TMPDIR={root}",
-                       "--env", "PYTHONDONTWRITEBYTECODE=1"]
+    supervisor = ROOT / "scripts/test_policy_supervisor.py"
+
+    def isolated_run(mode, tests):
+        with tempfile.TemporaryDirectory(prefix="ghidra-policy-oracle-") as oracle_temp, \
+                tempfile.TemporaryDirectory(prefix="ghidra-policy-worker-") as worker_temp, \
+                tempfile.TemporaryDirectory(prefix="ghidra-policy-data-") as data_temp:
+            oracle_read, worker_write = os.pipe()
+            worker_read, oracle_write = os.pipe()
+            common = ["docker", "run", "--rm", "--interactive", "--read-only", "--network=none",
+                      "--cap-drop=ALL", "--security-opt=no-new-privileges", "--memory=1g", "--cpus=2",
+                      "--pids-limit=256", "--user", f"{os.getuid()}:{os.getgid()}",
+                      "--env", "PYTHONDONTWRITEBYTECODE=1"]
+            mounts = []
             for source in dict.fromkeys((ROOT.resolve(), candidate.resolve())):
-                command += ["--mount", f"type=bind,source={source},target={source},readonly"]
-            command += ["--mount", f"type=bind,source={root},target={root}", POLICY_IMAGE, "python3", "-B",
-                        "-c", launcher, str(candidate / "scripts"), str(tests)]
-            subprocess.run(command, check=True, timeout=300)
+                mounts += ["--mount", f"type=bind,source={source},target={source},readonly"]
+            data_mount = (["--mount", f"type=bind,source={data_temp},target={data_temp}"]
+                          if mode == "baseline" else [])
+            worker_tmp = data_temp if mode == "baseline" else worker_temp
+            oracle_tmp = data_temp if mode == "baseline" else oracle_temp
+            worker_command = common + ["--workdir", worker_temp, "--env", f"HOME={worker_temp}",
+                                       "--env", f"TMPDIR={worker_tmp}"] + mounts + [
+                "--mount", f"type=bind,source={worker_temp},target={worker_temp}"] + data_mount + [POLICY_IMAGE,
+                "python3", "-B", str(supervisor), "worker", str(candidate / "scripts")]
+            oracle_command = common + ["--workdir", oracle_temp, "--env", f"HOME={oracle_temp}",
+                                       "--env", f"TMPDIR={oracle_tmp}"] + mounts + [
+                "--mount", f"type=bind,source={oracle_temp},target={oracle_temp}"] + data_mount + [POLICY_IMAGE,
+                "python3", "-B", str(supervisor), mode, str(candidate / "scripts"), str(tests)]
+            worker = subprocess.Popen(worker_command, stdin=worker_read, stdout=worker_write)
+            oracle = subprocess.Popen(oracle_command, stdin=oracle_read, stdout=oracle_write)
+            for descriptor in (oracle_read, oracle_write, worker_read, worker_write):
+                os.close(descriptor)
+            try:
+                if oracle.wait(timeout=300) != 0:
+                    raise subprocess.CalledProcessError(oracle.returncode, oracle_command)
+            finally:
+                worker.terminate()
+                try:
+                    worker.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    worker.kill()
+                    worker.wait()
+    # Both inventories and every assertion remain in the reviewed oracle.  The candidate process
+    # supplies only function results or exceptions over the pipe.
+    isolated_run("baseline", ROOT / "scripts")
+    isolated_run("cases", candidate / "scripts" / "cases")
     with tempfile.TemporaryDirectory(prefix="ghidra-actionlint-") as temporary:
         url = ("https://github.com/rhysd/actionlint/releases/download/v1.7.12/"
                "actionlint_1.7.12_linux_amd64.tar.gz")

@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "cases": [
+    {
+      "id": "inline-source-falls-back-to-commit",
+      "call": "inline_source",
+      "args": [{"original_commit_id": "not-a-sha", "commit_id": "candidate"}],
+      "expect": "candidate"
+    },
+    {
+      "id": "release-tag-rejects-non-sha-config",
+      "call": "release_tag",
+      "args": [{"version": "12.2", "upstream_sha": "1111111111111111111111111111111111111111"}, "not-a-sha"],
+      "raises": "ValueError"
+    }
+  ]
+}
