@@ -235,6 +235,59 @@ class ReviewTests(unittest.TestCase):
 
 
 class RepairAndRuntimeTests(unittest.TestCase):
+    def test_attempt_count_never_replaces_elapsed_budget(self):
+        source = selected()
+        cycle = release.hashlib.sha256(f"{source['upstream_sha']}:0".encode()).hexdigest()
+        state = {"config": BASE, "number": 6, "head": SHA, "upstream": source["upstream_sha"],
+                 "cycle": cycle}
+        comments = [{"user": {"login": "warelik", "type": "User"}, "created_at": WHEN,
+                     "body": f"<!-- ghidra-fix:{i:040x}:{i} -->"} for i in range(1, 5)]
+        records = {f"repos/{release.REPOSITORY}/releases": [],
+                   f"repos/{release.REPOSITORY}/pulls?state=all&base=downstream": [{}],
+                   f"repos/{release.REPOSITORY}/issues/6/comments": comments}
+        for expired in (False, True):
+            error = ValueError("Elapsed repair budget exhausted") if expired else None
+            with self.subTest(expired=expired), \
+                    patch.dict(release.os.environ, {"SELECTED_JSON": "selected",
+                                                   "NONBLOCKING_FOLLOWUP": "", "GITHUB_RUN_ID": "7"}), \
+                    patch.object(release, "configuration", return_value=(release.REPOSITORY, BASE)), \
+                    patch.object(release, "selected_source", return_value=source), \
+                    patch.object(release, "failed_job_evidence", return_value="Concrete failure"), \
+                    patch.object(release, "pages", side_effect=lambda endpoint: records[endpoint]), \
+                    patch.object(release, "repair_state", return_value=state), \
+                    patch.object(release, "active_repair", return_value=state), \
+                    patch.object(release, "owner_identity"), \
+                    patch.object(release, "enforce_deadline", side_effect=error) as deadline, \
+                    patch.object(release, "api") as api, \
+                    patch.object(release, "escalation") as escalation:
+                if expired:
+                    with self.assertRaisesRegex(ValueError, "Elapsed repair budget"):
+                        release.request_repair(None)
+                    api.assert_not_called()
+                    escalation.assert_called_once_with(BASE, source,
+                                                       str(error) + "\n\nConcrete failure")
+                else:
+                    release.request_repair(None)
+                    api.assert_called_once()
+                    self.assertIn(f"<!-- ghidra-fix:{SHA}:5 -->", api.call_args.kwargs["data"]["body"])
+                    escalation.assert_not_called()
+                deadline.assert_called_once_with(WHEN)
+
+    def test_repair_evidence_boundary_is_escalated(self):
+        source = selected()
+        for error in (ValueError("Job log API HTTP 403"),
+                      release.subprocess.TimeoutExpired(["gh", "api"], 60)):
+            with self.subTest(error=type(error).__name__), \
+                    patch.dict(release.os.environ, {"SELECTED_JSON": "selected",
+                                                   "NONBLOCKING_FOLLOWUP": "", "GITHUB_RUN_ID": "7"}), \
+                    patch.object(release, "configuration", return_value=(release.REPOSITORY, BASE)), \
+                    patch.object(release, "selected_source", return_value=source), \
+                    patch.object(release, "failed_job_evidence", side_effect=error), \
+                    patch.object(release, "escalation") as escalation:
+                with self.assertRaises(type(error)):
+                    release.request_repair(None)
+                escalation.assert_called_once_with(BASE, source, str(error))
+
     def test_job_evidence_reads_completed_failed_jobs_not_running_workflow_logs(self):
         response = {"jobs": [
             {"id": 1, "name": "still running repair", "status": "in_progress", "conclusion": None},
