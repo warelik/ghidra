@@ -138,6 +138,14 @@ class DeclarativePolicyTests(unittest.TestCase):
             release.needs_coding_after_review(
                 False, "Review PR identity changed", "success", "skipped", "skipped")
 
+    def test_pending_configuration_review_does_not_create_a_repair_pr(self):
+        with patch.dict(release.os.environ, {"PREPARE_MODE": "waiting",
+                                            "PREPARE_REASON": release.WAITING}), \
+                patch.object(release, "configuration") as configuration, \
+                redirect_stdout(StringIO()):
+            release.request_repair(None)
+        configuration.assert_not_called()
+
     def test_pending_review_does_not_post_a_coding_request(self):
         config, seed, head, upstream = (letter * 40 for letter in "abcd")
         state = {"config": config, "seed": seed, "head": head, "number": 6,

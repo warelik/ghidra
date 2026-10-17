@@ -625,7 +625,7 @@ def expected_labels(selected, config):
             "io.ghidra.patches.sha256": EMPTY_PATCHSET}
 
 
-def runtime_command(image, work, *, inspect=False):
+def runtime_command(image, work, *, inspect=False, mode="create"):
     command = ["docker", "run", "--rm", "--read-only", "--network=none", "--cap-drop=ALL",
                "--security-opt=no-new-privileges", "--memory=4g", "--cpus=2", "--pids-limit=512",
                "--user", "1001:1001", "--tmpfs", "/tmp:rw,nosuid,nodev,mode=1777",
@@ -641,8 +641,10 @@ def runtime_command(image, work, *, inspect=False):
                          "from java.lang import Runtime; "
                          "print('VERSION='+str(Application.getApplicationVersion())); "
                          "assert Runtime.getRuntime().maxMemory() <= 2*1024**3"]
+    if mode not in {"create", "verify"}:
+        raise ValueError("Smoke mode must be create or verify")
     return command + ["--mount", f"type=bind,source={ROOT / 'scripts'},target=/scripts,readonly",
-                      image, "/scripts/smoke.py"]
+                      image, "/scripts/smoke.py", mode]
 
 
 def build(directory):
@@ -682,8 +684,8 @@ def build(directory):
         found = run(*runtime_command(image, work, inspect=True))
         if f"VERSION={selected['version']}" not in found.splitlines():
             raise ValueError("Started Ghidra version does not match the official release")
-        subprocess.run(runtime_command(image, work), check=True, timeout=300)
-        subprocess.run(runtime_command(image, work), check=True, timeout=300)
+        subprocess.run(runtime_command(image, work, mode="create"), check=True, timeout=300)
+        subprocess.run(runtime_command(image, work, mode="verify"), check=True, timeout=300)
         info = json.loads(run("docker", "image", "inspect", image))[0]
         if (info.get("Architecture") != "amd64" or info.get("Os") != "linux"
                 or any(info["Config"]["Labels"].get(k) != v for k, v in
@@ -959,6 +961,10 @@ def failed_job_evidence(repo, run_id):
 
 
 def request_repair(path):
+    if (os.environ.get("PREPARE_MODE") == "waiting"
+            and os.environ.get("PREPARE_REASON") == WAITING):
+        print("Exact-SHA review is pending; no coding task or release was started")
+        return
     repo, config = configuration()
     selected = selected_source() if os.environ.get("SELECTED_JSON") else select_release()
     evidence = ""

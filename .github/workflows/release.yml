@@ -51,6 +51,7 @@ jobs:
     outputs:
       ready: ${{ steps.select.outputs.ready }}
       mode: ${{ steps.select.outputs.mode }}
+      reason: ${{ steps.select.outputs.reason }}
       selection: ${{ steps.select.outputs.selection }}
       pr: ${{ steps.select.outputs.pr }}
       review_base: ${{ steps.select.outputs.review_base }}
@@ -202,7 +203,7 @@ jobs:
 
   repair:
     name: Native Codex Repair Or Explicit Bounded Escalation
-    needs: [prepare, policy-check, build, publish, land]
+    needs: [prepare, pending, policy-check, build, publish, land]
     if: >-
       always() &&
       (contains(needs.*.result, 'failure') ||
@@ -226,6 +227,8 @@ jobs:
           SELECTED_JSON: ${{ needs.prepare.outputs.selection }}
           REVIEW_PR: ${{ needs.prepare.outputs.pr }}
           NONBLOCKING_FOLLOWUP: ${{ !contains(needs.*.result, 'failure') && needs.prepare.outputs.followup == 'true' }}
+          PREPARE_MODE: ${{ needs.prepare.outputs.mode }}
+          PREPARE_REASON: ${{ needs.prepare.outputs.reason }}
           PREPARE_RESULT: ${{ needs.prepare.result }}
           POLICY_RESULT: ${{ needs.policy-check.result }}
           LAND_RESULT: ${{ needs.land.result }}

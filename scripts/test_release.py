@@ -598,7 +598,14 @@ class RepairAndRuntimeTests(unittest.TestCase):
         self.assertIn("JAVA_TOOL_OPTIONS=-Xmx2g", command)
         self.assertNotIn("--privileged", command)
         self.assertFalse(any("docker.sock" in part or "podman.sock" in part for part in command))
-        self.assertTrue(command[-1].endswith("/smoke.py"))
+        self.assertTrue(command[-2].endswith("/smoke.py"))
+        self.assertEqual(command[-1], "create")
+        verify = release.runtime_command("sha256:" + "d" * 64,
+                                         Path("/isolated/fixture"), mode="verify")
+        self.assertEqual(verify[-2:], ["/scripts/smoke.py", "verify"])
+        with self.assertRaises(ValueError):
+            release.runtime_command("sha256:" + "d" * 64,
+                                    Path("/isolated/fixture"), mode="rewrite")
 
     def test_workflow_keeps_untrusted_code_in_read_only_job(self):
         workflow = (release.ROOT / ".github/workflows/release.yml").read_text()
@@ -608,6 +615,7 @@ class RepairAndRuntimeTests(unittest.TestCase):
         self.assertIn("persist-credentials: false", policy)
         self.assertIn("trusted/scripts/release.py check-policy", policy)
         self.assertIn("needs: [prepare, policy-check]", workflow)
+        self.assertIn("needs: [prepare, pending, policy-check, build, publish, land]", workflow)
         self.assertIn("cancel-in-progress: false", workflow)
         self.assertIn("format('ignored-{0}', github.run_id)", workflow)
 
