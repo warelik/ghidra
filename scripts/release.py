@@ -462,12 +462,20 @@ def completed_unchanged_task(comments, head):
                for c in comments)
 
 
-def allowed_repair_paths(changes):
+def needs_coding_after_review(ready, reason, policy_result, land_result):
+    if reason == WAITING:
+        return False
+    return not ready or policy_result == "failure" or land_result == "failure"
+
+
+def allowed_repair_paths(changes, existing=()):
     if not changes:
         raise ValueError("Repair has no declarative case changes")
     for path, mode in changes.items():
         if not re.fullmatch(r"scripts/cases/[A-Za-z0-9_-]+\.json", path) or mode != "100644":
             raise ValueError(f"Ordinary repair may contain regular declarative case data only: {path}")
+        if path in existing:
+            raise ValueError(f"Ordinary repair cannot replace a trusted regression case: {path}")
 
 
 TRUSTED_PATHS = {"README.md", ".github/workflows/release.yml",
@@ -503,7 +511,12 @@ def repair_diff(state):
     for path in changed:
         entry = run("git", "ls-tree", state["head"], "--", path, cwd=ROOT)
         modes[path] = entry.split()[0] if entry else None
-    (allowed_trusted_paths if state.get("kind") == "trusted" else allowed_repair_paths)(modes)
+    if state.get("kind") == "trusted":
+        allowed_trusted_paths(modes)
+    else:
+        existing = {path for path in changed
+                    if run("git", "ls-tree", state["config"], "--", path, cwd=ROOT)}
+        allowed_repair_paths(modes, existing)
     return changed
 
 
@@ -974,6 +987,13 @@ def request_repair(path):
                       "no release published")
                 return
             raise ValueError("Existing trusted task has not changed its head; blind reruns refused")
+        if state["head"] != state["seed"]:
+            ready, reason = request_review(state["head"], config, pr=state["number"])
+            if not needs_coding_after_review(
+                    ready, reason, os.environ.get("POLICY_RESULT"), os.environ.get("LAND_RESULT")):
+                print(f"Exact-SHA review or verification on #{state['number']} is pending; "
+                      "no new coding task requested")
+                return
         api(f"repos/{repo}/issues/{state['number']}/comments", method="POST", owner=True,
             data={"body": repair_prompt(state, len(requests) + 1, evidence)})
         print(f"Requested native Codex repair on #{state['number']}; no release published")

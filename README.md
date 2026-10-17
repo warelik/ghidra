@@ -31,7 +31,8 @@ Every six hours, on packaging changes and on authenticated Codex callbacks:
 Pending external review or repair is reported as unverified, not a successful
 release. P0/P1 findings block; P2/P3 findings receive automatic follow-up.
 Ordinary failures request bounded native Codex repair, but an ordinary candidate may
-change **only** regular safe-named `scripts/cases/*.json` data. Trusted code parses
+**add only** regular safe-named `scripts/cases/*.json` data; existing regression
+files and cases cannot be replaced or removed. Trusted code parses
 those files as bounded JSON literals and invokes a fixed function allowlist; no
 candidate Python, workflow, test runner, documentation, Dockerfile or `.repair`
 content is executed or adopted. The credential-free policy container retains no

@@ -402,7 +402,8 @@ class RepairAndRuntimeTests(unittest.TestCase):
     def test_attempt_count_never_replaces_elapsed_budget(self):
         source = selected()
         cycle = release.hashlib.sha256(f"{source['upstream_sha']}:0".encode()).hexdigest()
-        state = {"config": BASE, "number": 6, "head": SHA, "upstream": source["upstream_sha"],
+        state = {"config": BASE, "number": 6, "head": SHA, "seed": SHA,
+                 "upstream": source["upstream_sha"],
                  "cycle": cycle}
         comments = [{"user": {"login": "warelik", "type": "User"}, "created_at": WHEN,
                      "body": f"<!-- ghidra-fix:{i:040x}:{i} -->"} for i in range(1, 5)]
@@ -529,6 +530,9 @@ class RepairAndRuntimeTests(unittest.TestCase):
 
     def test_repair_never_changes_application_or_trusted_tests(self):
         release.allowed_repair_paths({"scripts/cases/regression-1.json": "100644"})
+        with self.assertRaises(ValueError):
+            release.allowed_repair_paths({"scripts/cases/helpers.json": "100644"},
+                                         {"scripts/cases/helpers.json"})
         for changes in ({}, {"Ghidra/application.properties": "100644"},
                         {"docker/Dockerfile": "100644"}, {"AGENTS.md": "100644"},
                         {"scripts/test_new.py": "100644"}, {"scripts/test_release.py": None},

@@ -3,7 +3,7 @@ import sys
 import unittest
 
 
-COUNT = 46
+COUNT = 48
 COMPLETION = f"GHIDRA_BASELINE_COMPLETE:{COUNT}"
 
 
