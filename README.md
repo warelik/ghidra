@@ -58,16 +58,16 @@ Draft PR #14 is the one-time bootstrap because the old default cannot recognize 
 trusted-update mode. Verify its exact head, run the full unit suite and rootless
 read-only policy container, obtain a clean owner-authored native exact-SHA review,
 then fast-forward `downstream` to that exact commit. Do not use the old generic
-`land` command for this bootstrap. Dispatch the release workflow afterward; it must
-perform a fresh default review and complete build before any publication. Future
+`land` command for this bootstrap. The ref update triggers `release.yml`; confirm
+that run and dispatch once only if it did not start. The workflow must perform a
+fresh default review and complete build before any publication. Future
 trusted updates follow the automated separate-PR cycle above and need no manual owner
 maintenance. The official application remains unmodified.
 
 The reviewed bootstrap operation is a non-forced ref update, after replacing
 `REVIEWED_SHA` with the full PR head verified by both `git ls-remote` and the native
 review: `gh api --method PATCH repos/warelik/ghidra/git/refs/heads/downstream
--f sha=REVIEWED_SHA -F force=false`. Immediately read the ref
-back and dispatch `release.yml` on `downstream`. Do not run this operation before the
+-f sha=REVIEWED_SHA -F force=false`. Immediately read the ref back. Do not update it before the
 review and rootless container check, and do not merge or mark draft PR #14 ready.
 
 Releases have the tag `build-VERSION-UPSTREAM_SHA12-CONFIG_SHA12` and exactly:

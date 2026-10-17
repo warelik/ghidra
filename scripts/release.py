@@ -860,7 +860,7 @@ def original_failure_evidence(repo, state):
         raise ValueError("Original repair failure evidence is missing or malformed")
     size, encoded = record.get("size"), record.get("content")
     if (record.get("type") != "file" or record.get("encoding") != "base64"
-            or type(size) is not int or not 0 < size <= 65536 or not isinstance(encoded, str)):
+            or type(size) is not int or not 0 < size <= 100000 or not isinstance(encoded, str)):
         raise ValueError("Original repair failure evidence is missing or malformed")
     try:
         raw = base64.b64decode("".join(encoded.split()), validate=True)

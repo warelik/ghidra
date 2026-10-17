@@ -98,6 +98,12 @@ class DeclarativePolicyTests(unittest.TestCase):
         with patch.object(release, "api", return_value={**record, "size": len(raw) + 1}), \
                 self.assertRaises(ValueError):
             release.original_failure_evidence(release.REPOSITORY, state)
+        multibyte = "😀" * 24000
+        encoded = multibyte.encode("utf-8")
+        large = {**record, "size": len(encoded),
+                 "content": base64.b64encode(encoded).decode("ascii")}
+        with patch.object(release, "api", return_value=large):
+            self.assertEqual(release.original_failure_evidence(release.REPOSITORY, state), multibyte)
 
     def test_task_start_does_not_escalate_before_completion(self):
         head = "a" * 40
