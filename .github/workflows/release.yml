@@ -226,6 +226,7 @@ jobs:
           SELECTED_JSON: ${{ needs.prepare.outputs.selection }}
           REVIEW_PR: ${{ needs.prepare.outputs.pr }}
           NONBLOCKING_FOLLOWUP: ${{ !contains(needs.*.result, 'failure') && needs.prepare.outputs.followup == 'true' }}
+          PREPARE_RESULT: ${{ needs.prepare.result }}
           POLICY_RESULT: ${{ needs.policy-check.result }}
           LAND_RESULT: ${{ needs.land.result }}
         run: python3 scripts/release.py repair "$RUNNER_TEMP/repair"

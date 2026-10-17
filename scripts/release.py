@@ -464,9 +464,11 @@ def completed_unchanged_task(comments, head):
                for c in comments)
 
 
-def needs_coding_after_review(ready, reason, policy_result, land_result):
-    if reason in {WAITING, "No owner-authored exact-SHA request"}:
+def needs_coding_after_review(ready, reason, prepare_result, policy_result, land_result):
+    if reason == WAITING:
         return False
+    if reason == "No owner-authored exact-SHA request":
+        return prepare_result == "failure"
     if not ready:
         if (reason == "Codex reported an unresolved P0/P1 finding on this commit"
                 or reason == "Latest exact-SHA Codex review is not positive"):
@@ -1023,7 +1025,8 @@ def request_repair(path):
         if state["head"] != state["seed"]:
             ready, reason = check_review(state["number"], state["head"], config)
             if not needs_coding_after_review(
-                    ready, reason, os.environ.get("POLICY_RESULT"), os.environ.get("LAND_RESULT")):
+                    ready, reason, os.environ.get("PREPARE_RESULT"),
+                    os.environ.get("POLICY_RESULT"), os.environ.get("LAND_RESULT")):
                 print(f"Exact-SHA review or verification on #{state['number']} is pending; "
                       "no new coding task requested")
                 return

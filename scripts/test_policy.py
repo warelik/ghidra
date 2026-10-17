@@ -119,16 +119,24 @@ class DeclarativePolicyTests(unittest.TestCase):
             [request, {**bot, "body": "### Summary\nNo data-only fix"}], head))
 
     def test_pending_review_does_not_request_another_coding_task(self):
-        self.assertFalse(release.needs_coding_after_review(False, release.WAITING, "skipped", "skipped"))
         self.assertFalse(release.needs_coding_after_review(
-            False, "No owner-authored exact-SHA request", "skipped", "skipped"))
-        self.assertFalse(release.needs_coding_after_review(True, "Reviewed", "skipped", "skipped"))
+            False, release.WAITING, "success", "skipped", "skipped"))
+        self.assertFalse(release.needs_coding_after_review(
+            False, "No owner-authored exact-SHA request", "success", "skipped", "skipped"))
         self.assertTrue(release.needs_coding_after_review(
-            False, "Codex reported an unresolved P0/P1 finding on this commit", "skipped", "skipped"))
-        self.assertTrue(release.needs_coding_after_review(True, "Reviewed", "failure", "skipped"))
-        self.assertTrue(release.needs_coding_after_review(True, "Reviewed", "success", "failure"))
+            False, "No owner-authored exact-SHA request", "failure", "skipped", "skipped"))
+        self.assertFalse(release.needs_coding_after_review(
+            True, "Reviewed", "success", "skipped", "skipped"))
+        self.assertTrue(release.needs_coding_after_review(
+            False, "Codex reported an unresolved P0/P1 finding on this commit",
+            "success", "skipped", "skipped"))
+        self.assertTrue(release.needs_coding_after_review(
+            True, "Reviewed", "success", "failure", "skipped"))
+        self.assertTrue(release.needs_coding_after_review(
+            True, "Reviewed", "success", "success", "failure"))
         with self.assertRaisesRegex(ValueError, "identity changed"):
-            release.needs_coding_after_review(False, "Review PR identity changed", "skipped", "skipped")
+            release.needs_coding_after_review(
+                False, "Review PR identity changed", "success", "skipped", "skipped")
 
     def test_pending_review_does_not_post_a_coding_request(self):
         config, seed, head, upstream = (letter * 40 for letter in "abcd")
@@ -168,22 +176,26 @@ class DeclarativePolicyTests(unittest.TestCase):
         records = {f"repos/{release.REPOSITORY}/releases": [],
                    f"repos/{release.REPOSITORY}/pulls?state=all&base=downstream": [{}],
                    f"repos/{release.REPOSITORY}/issues/6/comments": [request]}
-        finding = "Codex reported an unresolved P0/P1 finding on this commit"
-        with patch.dict(release.os.environ, {"SELECTED_JSON": "selected",
-                                            "NONBLOCKING_FOLLOWUP": "", "GITHUB_RUN_ID": "7"}), \
-                patch.object(release, "configuration", return_value=(release.REPOSITORY, config)), \
-                patch.object(release, "selected_source", return_value={"upstream_sha": upstream}), \
-                patch.object(release, "failed_job_evidence", return_value="Blocking review finding"), \
-                patch.object(release, "pages", side_effect=lambda endpoint: records[endpoint]), \
-                patch.object(release, "repair_state", return_value=state), \
-                patch.object(release, "active_repair", return_value=state), \
-                patch.object(release, "owner_identity"), \
-                patch.object(release, "enforce_deadline"), \
-                patch.object(release, "check_review", return_value=(False, finding)), \
-                patch.object(release, "api") as api, redirect_stdout(StringIO()):
-            release.request_repair(None)
-        api.assert_called_once()
-        self.assertIn(f"<!-- ghidra-fix:{head}:2 -->", api.call_args.kwargs["data"]["body"])
+        for finding, prepare in (
+                ("Codex reported an unresolved P0/P1 finding on this commit", "success"),
+                ("No owner-authored exact-SHA request", "failure")):
+            with self.subTest(finding=finding), \
+                    patch.dict(release.os.environ, {"SELECTED_JSON": "selected",
+                                                 "NONBLOCKING_FOLLOWUP": "", "GITHUB_RUN_ID": "7",
+                                                 "PREPARE_RESULT": prepare}), \
+                    patch.object(release, "configuration", return_value=(release.REPOSITORY, config)), \
+                    patch.object(release, "selected_source", return_value={"upstream_sha": upstream}), \
+                    patch.object(release, "failed_job_evidence", return_value="Blocking review finding"), \
+                    patch.object(release, "pages", side_effect=lambda endpoint: records[endpoint]), \
+                    patch.object(release, "repair_state", return_value=state), \
+                    patch.object(release, "active_repair", return_value=state), \
+                    patch.object(release, "owner_identity"), \
+                    patch.object(release, "enforce_deadline"), \
+                    patch.object(release, "check_review", return_value=(False, finding)), \
+                    patch.object(release, "api") as api, redirect_stdout(StringIO()):
+                release.request_repair(None)
+            api.assert_called_once()
+            self.assertIn(f"<!-- ghidra-fix:{head}:2 -->", api.call_args.kwargs["data"]["body"])
 
     def test_trusted_state_requires_original_repair_start(self):
         state = {"schema": 1, "kind": "trusted", "config": "a" * 40,

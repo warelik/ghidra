@@ -51,6 +51,8 @@ travels with the trusted PR and its deadline is checked again before adoption;
 a task-start acknowledgement cannot advance an ordinary attempt.
 Pending exact-SHA review also waits without issuing another coding task;
 confirmed blocking findings and failed policy/land checks return to native repair.
+Failure before a review request, including a forbidden candidate file, likewise
+returns to coding rather than waiting for a review that was never requested.
 Promotion carries the original immutable failure text from the ordinary seed and
 links the old PR, so a later generic waiting message cannot erase the repair target.
 
