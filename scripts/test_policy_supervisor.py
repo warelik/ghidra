@@ -379,25 +379,29 @@ class SupervisorRegressionTests(unittest.TestCase):
     """Attacks against the old same-interpreter launcher must fail closed."""
 
     def run_fixture(self, release_source, test_source, successful, case_name="T.test_answer"):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+        # Do not inherit TMPDIR here: production deliberately points TMPDIR at the
+        # candidate-visible data mount.  Executable fixtures and the local oracle
+        # controls must instead live below the oracle-private root.
+        with tempfile.TemporaryDirectory(prefix="ghidra-supervisor-oracle-", dir="/tmp") as private, \
+                tempfile.TemporaryDirectory(prefix="ghidra-supervisor-worker-", dir="/tmp") as worker, \
+                tempfile.TemporaryDirectory(prefix="ghidra-supervisor-data-", dir="/tmp") as shared:
+            oracle_root = Path(private)
+            root = oracle_root / "fixture"
+            root.mkdir()
             (root / "release.py").write_text(release_source)
             tests = root / "tests"
             tests.mkdir()
             (tests / "test_fixture.py").write_text(test_source)
-            worker_root, oracle_root, data_root = root / "worker", root / "oracle", root / "data"
-            worker_root.mkdir()
-            oracle_root.mkdir()
-            data_root.mkdir()
+            worker_root, data_root = Path(worker), Path(shared)
             environment = {**os.environ, "TMPDIR": str(data_root), "HOME": str(oracle_root)}
             oracle_read, worker_write = os.pipe()
             worker_read, oracle_write = os.pipe()
             worker_process = subprocess.Popen(
-                [sys.executable, "-B", __file__, "worker", directory],
+                [sys.executable, "-B", __file__, "worker", str(root)],
                 stdin=worker_read, stdout=worker_write, stderr=subprocess.DEVNULL,
                 cwd=worker_root, env={**environment, "HOME": str(worker_root)})
             oracle_process = subprocess.Popen(
-                [sys.executable, "-B", __file__, "case", directory, str(tests),
+                [sys.executable, "-B", __file__, "case", str(root), str(tests),
                  f"test_fixture.py:{case_name}"],
                 stdin=oracle_read, stdout=oracle_write, stderr=subprocess.PIPE, text=True,
                 cwd=oracle_root, env=environment)
