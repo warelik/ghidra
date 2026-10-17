@@ -1,4 +1,6 @@
 import json
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 import subprocess
 import tempfile
@@ -20,7 +22,8 @@ class DeclarativePolicyTests(unittest.TestCase):
     def test_honest_pass_and_fail(self):
         good = [{"id": "ok", "call": "inline_source", "args": [{"commit_id": "abc"}],
                  "expect": "abc"}]
-        case_runner.evaluate(self.document(good))
+        with redirect_stdout(StringIO()):
+            case_runner.evaluate(self.document(good))
         bad = [{**good[0], "expect": "wrong"}]
         with self.assertRaises(AssertionError):
             case_runner.evaluate(self.document(bad))
