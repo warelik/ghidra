@@ -340,8 +340,8 @@ class RepairAndRuntimeTests(unittest.TestCase):
             release.enforce_runner_budget()
         exhausted = {"id": 1, "status": "completed", "conclusion": "success",
                      "started_at": "2026-01-01T01:00:00Z",
-                     "completed_at": "2026-01-01T02:00:00Z"}
-        now = release.datetime.fromisoformat("2026-01-01T03:00:00+00:00")
+                     "completed_at": "2026-01-01T03:00:00Z"}
+        now = release.datetime.fromisoformat("2026-01-01T04:00:00+00:00")
         with patch.object(release, "pages", side_effect=[
                 [publication], [request], [run], [exhausted]]), \
                 self.assertRaisesRegex(ValueError, "runner budget exhausted"):

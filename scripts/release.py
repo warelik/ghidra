@@ -35,7 +35,7 @@ REPAIR_STATE = re.compile(r"<!-- ghidra-repair:v1 (\{[^\n]+\}) -->")
 FIX_REQUEST = re.compile(r"<!-- ghidra-fix:([0-9a-f]{40}):([1-9][0-9]*) -->")
 WAITING = "Pending authenticated exact-SHA Codex review; nothing verified or published"
 DEADLINE_SECONDS = 7200
-RUNNER_BUDGET_SECONDS = 3600
+RUNNER_BUDGET_SECONDS = 7200
 TERMINAL_ESCAPE_REFUSAL = (
     "the response contains terminal escape sequences; "
     "pass --allow-escape-sequences to output it anyway"
