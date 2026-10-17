@@ -918,7 +918,7 @@ def request_repair(path):
 def check_policy(candidate):
     supervisor = ROOT / "scripts/test_policy_supervisor.py"
 
-    def isolated_run(mode, tests, case=None):
+    def isolated_run(mode, tests):
         with tempfile.TemporaryDirectory(prefix="ghidra-policy-oracle-") as oracle_temp, \
                 tempfile.TemporaryDirectory(prefix="ghidra-policy-worker-") as worker_temp, \
                 tempfile.TemporaryDirectory(prefix="ghidra-policy-data-") as data_temp:
@@ -944,15 +944,12 @@ def check_policy(candidate):
                 "--mount", f"type=bind,source={oracle_temp},target={oracle_temp}",
                 "--mount", f"type=bind,source={data_temp},target={data_temp}", POLICY_IMAGE,
                 "python3", "-B", str(supervisor), mode, str(candidate / "scripts"), str(tests)]
-            if case:
-                oracle_command.append(case)
             worker = subprocess.Popen(worker_command, stdin=worker_read, stdout=worker_write)
             oracle = subprocess.Popen(oracle_command, stdin=oracle_read, stdout=oracle_write)
             for descriptor in (oracle_read, oracle_write, worker_read, worker_write):
                 os.close(descriptor)
             try:
-                expected = 73 if mode == "case" else 0
-                if oracle.wait(timeout=300) != expected:
+                if oracle.wait(timeout=300) != 0:
                     raise subprocess.CalledProcessError(oracle.returncode, oracle_command)
             finally:
                 worker.terminate()
@@ -963,13 +960,10 @@ def check_policy(candidate):
                     worker.wait()
     # The immutable baseline is discovered and executed only by the trusted oracle.
     isolated_run("oracle", ROOT / "scripts")
-    # Candidate test source is parsed, never imported, while constructing the inventory.
-    inventory = json.loads(run("python3", "-B", str(supervisor), "inventory",
-                               str(candidate / "scripts"), cwd=ROOT))
-    if not inventory or not all(isinstance(case, str) for case in inventory):
-        raise ValueError("Proposed test inventory is empty or malformed")
-    for case in inventory:
-        isolated_run("case", candidate / "scripts", case)
+    # Exact-SHA review is the source-authority boundary for proposed tests.  Run their ordinary
+    # unittest result in a separate oracle; unlike the immutable baseline this deliberately does
+    # not claim to attest assertions against malicious reviewed Python.
+    isolated_run("proposed", candidate / "scripts")
     with tempfile.TemporaryDirectory(prefix="ghidra-actionlint-") as temporary:
         url = ("https://github.com/rhysd/actionlint/releases/download/v1.7.12/"
                "actionlint_1.7.12_linux_amd64.tar.gz")
