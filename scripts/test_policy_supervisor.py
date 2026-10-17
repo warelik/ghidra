@@ -6,9 +6,11 @@ the policy suite; callable values installed by unittest.mock are called back in
 the trusted process rather than deserialized in the candidate.
 """
 import argparse
+import ast
 import base64
 from datetime import datetime
 import importlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -237,6 +239,72 @@ def oracle(candidate, tests):
         raise RuntimeError(f"trusted unittest failed ({result.testsRun}/{count} executed)")
 
 
+def inventory(tests):
+    """Return an immutable, non-executing inventory of conventional unittest cases."""
+    cases = []
+    for path in sorted(Path(tests).glob("test_*.py")):
+        if path.name == "test_policy_supervisor.py":
+            continue
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef):
+                for member in node.body:
+                    if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)) and member.name.startswith("test"):
+                        cases.append(f"{path.name}:{node.name}.{member.name}")
+    return cases
+
+
+def case_child(candidate, tests, identity):
+    """Execute exactly one proposed assertion, independently of the candidate worker."""
+    filename, name = identity.split(":", 1)
+    expected = set(inventory(tests))
+    if identity not in expected or Path(filename).name != filename:
+        raise ProtocolError("case is absent from the trusted inventory")
+    client = Client(sys.stdin, sys.stdout)
+    module = types.ModuleType("release")
+    module.__class__ = type("RemoteModule", (types.ModuleType,), {
+        "__getattr__": lambda self, attr: client.request("get", 0, attr),
+        "__setattr__": lambda self, attr, value: types.ModuleType.__setattr__(self, attr, value)
+        if attr.startswith("__") else client.request("set", 0, attr, value),
+        "__delattr__": lambda self, attr: client.request("del", 0, attr)})
+    sys.modules["release"] = module
+    # Capture the runner primitives before executing any proposed module code.
+    suite = unittest.TestSuite()
+    add_test = suite.addTest
+    run_suite = unittest.TextTestRunner(verbosity=2).run
+    path = Path(tests) / filename
+    spec = importlib.util.spec_from_file_location("_proposed_test", path)
+    proposed = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(proposed)
+    class_name, method_name = name.split(".", 1)
+    test = getattr(proposed, class_name)(method_name)
+    add_test(test)
+    result = run_suite(suite)
+    if result.testsRun != 1 or not result.wasSuccessful():
+        raise RuntimeError("proposed test case did not complete successfully")
+    os.write(int(os.environ["GHIDRA_COMPLETION_FD"]), b"completed-one-case\n")
+    return 73
+
+
+def case(candidate, tests, identity):
+    """Keep scheduling/completion state outside the proposed-test interpreter."""
+    completion_read, completion_write = os.pipe()
+    environment = {**os.environ, "GHIDRA_COMPLETION_FD": str(completion_write)}
+    process = subprocess.Popen(
+        [sys.executable, "-B", __file__, "case-child", candidate, tests, identity],
+        stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr, env=environment,
+        pass_fds=(completion_write,))
+    os.close(completion_write)
+    try:
+        marker = os.read(completion_read, 64)
+        returncode = process.wait()
+    finally:
+        os.close(completion_read)
+    if returncode != 73 or marker != b"completed-one-case\n":
+        raise ProtocolError("proposed test did not produce trusted per-case completion")
+    return 73
+
+
 def worker(candidate):
     protocol = os.fdopen(os.dup(sys.stdout.fileno()), "w", buffering=1)
     sys.stdout = sys.stderr
@@ -310,7 +378,7 @@ def worker(candidate):
 class SupervisorRegressionTests(unittest.TestCase):
     """Attacks against the old same-interpreter launcher must fail closed."""
 
-    def run_fixture(self, release_source, test_source, successful):
+    def run_fixture(self, release_source, test_source, successful, case_name="T.test_answer"):
         # Do not inherit TMPDIR here: production deliberately points TMPDIR at the
         # candidate-visible data mount.  Executable fixtures and the local oracle
         # controls must instead live below the oracle-private root.
@@ -333,7 +401,8 @@ class SupervisorRegressionTests(unittest.TestCase):
                 stdin=worker_read, stdout=worker_write, stderr=subprocess.DEVNULL,
                 cwd=worker_root, env={**environment, "HOME": str(worker_root)})
             oracle_process = subprocess.Popen(
-                [sys.executable, "-B", __file__, "proposed", str(root), str(tests)],
+                [sys.executable, "-B", __file__, "case", str(root), str(tests),
+                 f"test_fixture.py:{case_name}"],
                 stdin=oracle_read, stdout=oracle_write, stderr=subprocess.PIPE, text=True,
                 cwd=oracle_root, env=environment)
             for descriptor in (oracle_read, oracle_write, worker_read, worker_write):
@@ -345,7 +414,7 @@ class SupervisorRegressionTests(unittest.TestCase):
             finally:
                 worker_process.terminate()
                 worker_process.wait(timeout=10)
-            self.assertEqual(returncode == 0, successful, diagnostics)
+            self.assertEqual(returncode == 73, successful, diagnostics)
 
     def test_shared_data_paths_cross_distinct_private_roots(self):
         source = ("from pathlib import Path\n"
@@ -378,10 +447,10 @@ class SupervisorRegressionTests(unittest.TestCase):
                          "import unittest,release\nclass T(unittest.TestCase):\n"
                          " def test_answer(self): release.anything()\n", False)
 
-    def test_reviewed_test_source_is_the_assertion_authority(self):
+    def test_proposed_module_exit_and_loader_tampering_fail_closed(self):
         exiting = ("import os,unittest\nos._exit(0)\nclass T(unittest.TestCase):\n"
                    " def test_answer(self): self.assertTrue(True)\n")
-        self.run_fixture("def answer(): return 42\n", exiting, True)
+        self.run_fixture("def answer(): return 42\n", exiting, False)
         forged = ("import os,unittest\nos._exit(73)\nclass T(unittest.TestCase):\n"
                   " def test_answer(self): self.assertTrue(True)\n")
         self.run_fixture("def answer(): return 42\n", forged, False)
@@ -389,7 +458,7 @@ class SupervisorRegressionTests(unittest.TestCase):
                      "unittest.TextTestRunner.run=lambda *a,**k: type('R',(),"
                      "{'testsRun':1,'wasSuccessful':lambda s:True})()\n"
                      "class T(unittest.TestCase):\n def test_answer(self): self.fail('required')\n")
-        self.run_fixture("def answer(): return 42\n", tampering, True)
+        self.run_fixture("def answer(): return 42\n", tampering, False)
 
     def test_real_assertion_failure_fails(self):
         test = ("import unittest,release\nclass T(unittest.TestCase):\n"
@@ -404,12 +473,20 @@ class SupervisorRegressionTests(unittest.TestCase):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=("oracle", "proposed", "worker"))
+    parser.add_argument("mode", choices=("oracle", "worker", "inventory", "case", "case-child"))
     parser.add_argument("candidate")
     parser.add_argument("tests", nargs="?")
+    parser.add_argument("case", nargs="?")
     args = parser.parse_args()
     if args.mode == "worker":
         return worker(args.candidate)
+    if args.mode == "inventory":
+        print(json.dumps(inventory(args.candidate)))
+        return 0
+    if args.mode == "case":
+        return case(args.candidate, args.tests, args.case)
+    if args.mode == "case-child":
+        return case_child(args.candidate, args.tests, args.case)
     return oracle(args.candidate, args.tests)
 
 
