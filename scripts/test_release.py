@@ -13,6 +13,7 @@ import release
 
 SHA = "1" * 40
 BASE = "2" * 40
+OLD = "3" * 40
 WHEN = "2026-01-01T00:00:00Z"
 BOT = {"login": release.BOT, "type": "Bot"}
 APP = {"slug": release.APP}
@@ -193,6 +194,45 @@ class ReviewTests(unittest.TestCase):
         finding["body"] = "[P2] Nonblocking follow-up"
         self.assertTrue(self.gate(reviews=[self.approved()], inline=[finding])[0])
 
+    def test_migrated_old_major_finding_does_not_block_fresh_native_review(self):
+        finding = {"user": BOT, "commit_id": SHA, "original_commit_id": OLD,
+                   "body": "[P1] Finding on the old reviewed source"}
+        self.assertTrue(self.gate(inline=[finding], comments=[self.native()])[0])
+
+    def test_current_source_major_finding_still_blocks(self):
+        finding = {"user": BOT, "commit_id": SHA, "original_commit_id": SHA,
+                   "body": "[P1] Finding on the current reviewed source"}
+        self.assertFalse(self.gate(inline=[finding], comments=[self.native()])[0])
+
+    def test_invalid_original_identity_falls_back_to_mapped_commit(self):
+        for original in (None, "not-a-full-sha", SHA[:12]):
+            finding = {"user": BOT, "commit_id": SHA,
+                       "body": "[P1] Conservatively associated finding"}
+            if original is not None:
+                finding["original_commit_id"] = original
+            else:
+                finding["original_commit_id"] = None
+            with self.subTest(original=original):
+                self.assertFalse(self.gate(inline=[finding], comments=[self.native()])[0])
+
+        missing = {"user": BOT, "commit_id": SHA, "body": "[P1] Missing original identity"}
+        self.assertFalse(self.gate(inline=[missing], comments=[self.native()])[0])
+
+    def test_stale_finding_cannot_replace_completed_current_review(self):
+        finding = {"user": BOT, "commit_id": SHA, "original_commit_id": OLD,
+                   "body": "[P1] Finding on the old reviewed source"}
+        self.assertFalse(self.gate(inline=[finding])[0])
+
+    def test_minor_findings_use_original_review_source(self):
+        stale = {"user": BOT, "commit_id": SHA, "original_commit_id": OLD,
+                 "body": "[P2] Old follow-up"}
+        current = {"user": BOT, "commit_id": SHA, "original_commit_id": SHA,
+                   "body": "[P3] Current follow-up"}
+        fallback = {"user": BOT, "commit_id": SHA, "original_commit_id": "malformed",
+                    "body": "[P2] Conservative follow-up"}
+        with patch.object(release, "pages", return_value=[stale, current, fallback]):
+            self.assertEqual(release.minor_findings(9, SHA), [current, fallback])
+
     def test_incomplete_ambiguous_or_stale_completion_does_not_pass(self):
         for state in ({"commit_sha": BASE, "status": "completed", "has_any_findings": False,
                        "has_unresolved_findings": False},
@@ -235,6 +275,183 @@ class ReviewTests(unittest.TestCase):
 
 
 class RepairAndRuntimeTests(unittest.TestCase):
+    def test_runner_budget_counts_all_attempts_jobs_and_clipped_running_time(self):
+        publication = "2026-01-01T00:00:00Z"
+        request = "2026-01-01T01:00:00Z"
+        owner = {"login": "warelik", "type": "User"}
+        endpoints = []
+
+        def records(endpoint, **_kwargs):
+            endpoint = endpoint.split("&per_page=")[0].split("?per_page=")[0]
+            endpoints.append(endpoint)
+            if endpoint == f"repos/{release.REPOSITORY}/releases":
+                return [{"draft": False, "prerelease": False, "published_at": publication},
+                        {"draft": True, "prerelease": False, "published_at": None}]
+            if endpoint.startswith(f"repos/{release.REPOSITORY}/issues/comments?"):
+                return [
+                    {"user": owner, "created_at": "2025-12-31T23:00:00Z",
+                     "body": f"<!-- ghidra-fix:{SHA}:8 -->"},
+                    {"user": owner, "created_at": request,
+                     "body": f"<!-- ghidra-fix:{SHA}:9 -->"},
+                    {"user": {"login": "someone", "type": "User"}, "created_at": request,
+                     "body": f"<!-- ghidra-fix:{SHA}:1 -->"}]
+            if endpoint == f"repos/{release.REPOSITORY}/actions/workflows/release.yml/runs":
+                return {"workflow_runs": [{"id": 10, "run_attempt": 2},
+                                          {"id": 11, "run_attempt": 1}]}
+            jobs = {
+                f"repos/{release.REPOSITORY}/actions/runs/10/attempts/1/jobs": [
+                    {"id": 1, "status": "completed", "conclusion": "failure",
+                     "started_at": "2026-01-01T00:50:00Z", "completed_at": "2026-01-01T01:10:00Z"},
+                    {"id": 2, "status": "completed", "conclusion": "skipped",
+                     "started_at": None, "completed_at": None}],
+                f"repos/{release.REPOSITORY}/actions/runs/10/attempts/2/jobs": [
+                    {"id": 3, "status": "completed", "conclusion": "success",
+                     "started_at": "2026-01-01T01:20:00Z", "completed_at": "2026-01-01T01:25:00Z"}],
+                f"repos/{release.REPOSITORY}/actions/runs/11/attempts/1/jobs": [
+                    {"id": 1, "status": "completed", "conclusion": "failure",
+                     "started_at": "2026-01-01T00:50:00Z", "completed_at": "2026-01-01T01:10:00Z"},
+                    {"id": 4, "status": "in_progress", "conclusion": None,
+                     "started_at": "2026-01-01T01:50:00Z", "completed_at": None},
+                    {"id": 5, "status": "queued", "conclusion": None,
+                     "started_at": None, "completed_at": None}]}
+            return {"jobs": jobs[endpoint]}
+
+        now = release.datetime.fromisoformat("2026-01-01T02:00:00+00:00")
+        with patch.object(release, "api", side_effect=records):
+            self.assertEqual(release.enforce_runner_budget(now), 1500)
+        self.assertIn(f"repos/{release.REPOSITORY}/actions/runs/10/attempts/1/jobs", endpoints)
+        self.assertIn(f"repos/{release.REPOSITORY}/actions/runs/10/attempts/2/jobs", endpoints)
+
+    def test_runner_budget_fails_closed_for_denial_and_malformed_metrics(self):
+        publication = {"draft": False, "prerelease": False,
+                       "published_at": "2026-01-01T00:00:00Z"}
+        request = {"user": {"login": "warelik", "type": "User"},
+                   "created_at": "2026-01-01T01:00:00Z",
+                   "body": f"<!-- ghidra-fix:{SHA}:1 -->"}
+        run = {"id": 10, "run_attempt": 1}
+        denied = ValueError("GitHub request failed: HTTP 403")
+        with patch.object(release, "pages", side_effect=[[publication], [request], denied]), \
+                self.assertRaisesRegex(ValueError, "HTTP 403"):
+            release.enforce_runner_budget()
+        malformed = {"id": 1, "status": "completed", "conclusion": "success",
+                     "started_at": "not-a-time", "completed_at": "2026-01-01T01:01:00Z"}
+        with patch.object(release, "pages", side_effect=[[publication], [request], [run], [malformed]]), \
+                self.assertRaisesRegex(ValueError, "malformed"):
+            release.enforce_runner_budget()
+        exhausted = {"id": 1, "status": "completed", "conclusion": "success",
+                     "started_at": "2026-01-01T01:00:00Z",
+                     "completed_at": "2026-01-01T02:00:00Z"}
+        now = release.datetime.fromisoformat("2026-01-01T03:00:00+00:00")
+        with patch.object(release, "pages", side_effect=[
+                [publication], [request], [run], [exhausted]]), \
+                self.assertRaisesRegex(ValueError, "runner budget exhausted"):
+            release.enforce_runner_budget(now)
+
+    def test_provider_lists_are_paginated_until_a_short_page(self):
+        full = [{"id": item} for item in range(100)]
+        with patch.object(release, "api", side_effect=[full, [{"id": 100}]]) as api:
+            self.assertEqual(len(release.pages("provider/list?filter=all")), 101)
+        self.assertEqual(api.call_args_list[0].args[0], "provider/list?filter=all&per_page=100&page=1")
+        self.assertEqual(api.call_args_list[1].args[0], "provider/list?filter=all&per_page=100&page=2")
+
+        with patch.object(release, "api", side_effect=[
+                {"jobs": full}, {"jobs": [{"id": 100}]}]):
+            self.assertEqual(len(release.pages("provider/jobs", list_field="jobs")), 101)
+        for response in ({}, {"jobs": {}}, []):
+            with self.subTest(response=response), patch.object(release, "api", return_value=response), \
+                    self.assertRaises(ValueError):
+                release.pages("provider/jobs", list_field="jobs")
+
+    def test_cli_budget_boundary_blocks_exhaustion_but_not_high_attempt_count(self):
+        target = "/tmp/unused"
+        with patch.object(release.sys, "argv", ["release.py", "prepare", target]), \
+                patch.object(release, "enforce_runner_budget",
+                             side_effect=ValueError("Cumulative runner budget exhausted")), \
+                patch.object(release, "prepare") as handler, \
+                self.assertRaisesRegex(ValueError, "runner budget exhausted"):
+            release.main()
+        handler.assert_not_called()
+
+        source = selected()
+        issue = {"number": 9, "body": f"<!-- ghidra-escalation:{source['upstream_sha']} -->",
+                 "user": {"login": "warelik"}}
+        for message in ("Cumulative runner budget exhausted", "GitHub request failed: HTTP 403"):
+            with self.subTest(message=message), \
+                    patch.object(release.sys, "argv", ["release.py", "repair", target]), \
+                    patch.dict(release.os.environ, {"SELECTED_JSON": "selected"}), \
+                    patch.object(release, "enforce_runner_budget", side_effect=ValueError(message)), \
+                    patch.object(release, "configuration", return_value=(release.REPOSITORY, BASE)) as config, \
+                    patch.object(release, "selected_source", return_value=source) as selection, \
+                    patch.object(release, "pages", return_value=[issue]), \
+                    patch.object(release, "api") as api, \
+                    patch.object(release, "request_repair") as handler, \
+                    self.assertRaisesRegex(ValueError, message):
+                release.main()
+            config.assert_called_once_with()
+            selection.assert_called_once_with()
+            handler.assert_not_called()
+            api.assert_called_once_with(f"repos/{release.REPOSITORY}/issues/9/comments",
+                                        method="POST", data=unittest.mock.ANY)
+        with patch.object(release.sys, "argv", ["release.py", "repair", target]), \
+                patch.object(release, "enforce_runner_budget", return_value=3599) as budget, \
+                patch.object(release, "request_repair") as handler:
+            release.main()
+        budget.assert_called_once_with()
+        handler.assert_called_once()
+
+    def test_attempt_count_never_replaces_elapsed_budget(self):
+        source = selected()
+        cycle = release.hashlib.sha256(f"{source['upstream_sha']}:0".encode()).hexdigest()
+        state = {"config": BASE, "number": 6, "head": SHA, "upstream": source["upstream_sha"],
+                 "cycle": cycle}
+        comments = [{"user": {"login": "warelik", "type": "User"}, "created_at": WHEN,
+                     "body": f"<!-- ghidra-fix:{i:040x}:{i} -->"} for i in range(1, 5)]
+        records = {f"repos/{release.REPOSITORY}/releases": [],
+                   f"repos/{release.REPOSITORY}/pulls?state=all&base=downstream": [{}],
+                   f"repos/{release.REPOSITORY}/issues/6/comments": comments}
+        for expired in (False, True):
+            error = ValueError("Elapsed repair budget exhausted") if expired else None
+            with self.subTest(expired=expired), \
+                    patch.dict(release.os.environ, {"SELECTED_JSON": "selected",
+                                                   "NONBLOCKING_FOLLOWUP": "", "GITHUB_RUN_ID": "7"}), \
+                    patch.object(release, "configuration", return_value=(release.REPOSITORY, BASE)), \
+                    patch.object(release, "selected_source", return_value=source), \
+                    patch.object(release, "failed_job_evidence", return_value="Concrete failure"), \
+                    patch.object(release, "pages", side_effect=lambda endpoint: records[endpoint]), \
+                    patch.object(release, "repair_state", return_value=state), \
+                    patch.object(release, "active_repair", return_value=state), \
+                    patch.object(release, "owner_identity"), \
+                    patch.object(release, "enforce_deadline", side_effect=error) as deadline, \
+                    patch.object(release, "api") as api, \
+                    patch.object(release, "escalation") as escalation:
+                if expired:
+                    with self.assertRaisesRegex(ValueError, "Elapsed repair budget"):
+                        release.request_repair(None)
+                    api.assert_not_called()
+                    escalation.assert_called_once_with(BASE, source,
+                                                       str(error) + "\n\nConcrete failure")
+                else:
+                    release.request_repair(None)
+                    api.assert_called_once()
+                    self.assertIn(f"<!-- ghidra-fix:{SHA}:5 -->", api.call_args.kwargs["data"]["body"])
+                    escalation.assert_not_called()
+                deadline.assert_called_once_with(WHEN)
+
+    def test_repair_evidence_boundary_is_escalated(self):
+        source = selected()
+        for error in (ValueError("Job log API HTTP 403"),
+                      release.subprocess.TimeoutExpired(["gh", "api"], 60)):
+            with self.subTest(error=type(error).__name__), \
+                    patch.dict(release.os.environ, {"SELECTED_JSON": "selected",
+                                                   "NONBLOCKING_FOLLOWUP": "", "GITHUB_RUN_ID": "7"}), \
+                    patch.object(release, "configuration", return_value=(release.REPOSITORY, BASE)), \
+                    patch.object(release, "selected_source", return_value=source), \
+                    patch.object(release, "failed_job_evidence", side_effect=error), \
+                    patch.object(release, "escalation") as escalation:
+                with self.assertRaises(type(error)):
+                    release.request_repair(None)
+                escalation.assert_called_once_with(BASE, source, str(error))
+
     def test_job_evidence_reads_completed_failed_jobs_not_running_workflow_logs(self):
         response = {"jobs": [
             {"id": 1, "name": "still running repair", "status": "in_progress", "conclusion": None},
@@ -250,6 +467,44 @@ class RepairAndRuntimeTests(unittest.TestCase):
                 f"repos/{release.REPOSITORY}/actions/runs/39034727367/jobs?filter=latest&per_page=100&page=1")
             self.assertEqual(run.call_args.args[0],
                              ["gh", "api", f"repos/{release.REPOSITORY}/actions/jobs/2/logs"])
+
+    def test_job_evidence_retries_only_terminal_escape_refusal(self):
+        response = {"jobs": [{"id": 2, "name": "build", "status": "completed",
+                              "conclusion": "failure"}]}
+        refused = type("Result", (), {"returncode": 1, "stdout": "",
+                                      "stderr": release.TERMINAL_ESCAPE_REFUSAL})()
+        retrieved = type("Result", (), {"returncode": 0, "stdout": "failure log", "stderr": ""})()
+        with patch.object(release, "api", return_value=response), \
+                patch.object(release.subprocess, "run", side_effect=[refused, retrieved]) as run:
+            self.assertIn("failure log", release.failed_job_evidence(release.REPOSITORY, "7"))
+            self.assertEqual(run.call_args_list[0].args[0],
+                             ["gh", "api", f"repos/{release.REPOSITORY}/actions/jobs/2/logs"])
+            self.assertEqual(run.call_args_list[1].args[0],
+                             ["gh", "api", "--allow-escape-sequences",
+                              f"repos/{release.REPOSITORY}/actions/jobs/2/logs"])
+
+    def test_job_evidence_terminal_escape_retry_failure_is_fatal(self):
+        response = {"jobs": [{"id": 2, "status": "completed", "conclusion": "failure"}]}
+        refused = type("Result", (), {"returncode": 1, "stdout": "",
+                                      "stderr": release.TERMINAL_ESCAPE_REFUSAL})()
+        failed = type("Result", (), {"returncode": 1, "stdout": "", "stderr": "HTTP 403"})()
+        with patch.object(release, "api", return_value=response), \
+                patch.object(release.subprocess, "run", side_effect=[refused, failed]) as run, \
+                self.assertRaisesRegex(ValueError, "HTTP 403"):
+            release.failed_job_evidence(release.REPOSITORY, "7")
+        self.assertEqual(run.call_count, 2)
+
+    def test_job_evidence_neutralizes_terminal_controls(self):
+        response = {"jobs": [{"id": 2, "status": "completed", "conclusion": "failure"}]}
+        result = type("Result", (), {"returncode": 0,
+                                     "stdout": "plain\ttext\n\x1b[31mred\x1b[0m\rnext\x07",
+                                     "stderr": ""})()
+        with patch.object(release, "api", return_value=response), \
+                patch.object(release.subprocess, "run", return_value=result):
+            evidence = release.failed_job_evidence(release.REPOSITORY, "7")
+        self.assertIn("plain\ttext\n\\x1b[31mred\\x1b[0m\\x0dnext\\x07", evidence)
+        self.assertNotIn("\x1b", evidence)
+        self.assertNotIn("\r", evidence)
 
     def test_missing_failed_job_or_log_is_not_replaced_by_generic_repair_evidence(self):
         with patch.object(release, "api", return_value={"jobs": []}), self.assertRaises(ValueError):
@@ -286,6 +541,48 @@ class RepairAndRuntimeTests(unittest.TestCase):
                 "user": {"login": "untrusted"}, "head": {"ref": "repair/fake",
                 "repo": {"full_name": "untrusted/fork"}}}
         self.assertIsNone(release.repair_state(pull))
+
+    def test_land_selectively_adopts_allowed_blobs_without_repair_evidence_or_history(self):
+        state = {"number": 6, "head": SHA, "seed": OLD, "config": BASE}
+        changed = [".github/workflows/release.yml", "scripts/release.py",
+                   "scripts/test_release.py"]
+        blobs = {name: f"blob-{index}" for index, name in enumerate(changed)}
+
+        def git_boundary(*args, **_kwargs):
+            self.assertEqual(args[:2], ("git", "ls-tree"))
+            path = args[-1]
+            # The candidate also contains .repair/failure.txt, but land must never inspect or adopt it.
+            self.assertIn(path, changed)
+            return f"100644 blob {blobs[path]}\t{path}"
+
+        def github_boundary(endpoint, method="GET", data=None, **_kwargs):
+            if endpoint == f"repos/{release.REPOSITORY}/git/commits/{BASE}":
+                return {"tree": {"sha": "trusted-tree"}}
+            if endpoint == f"repos/{release.REPOSITORY}/git/trees":
+                self.assertEqual(method, "POST")
+                self.assertEqual(data, {"base_tree": "trusted-tree", "tree": [
+                    {"path": name, "mode": "100644", "type": "blob", "sha": blobs[name]}
+                    for name in changed]})
+                return {"sha": "adopted-tree"}
+            if endpoint == f"repos/{release.REPOSITORY}/git/commits":
+                self.assertEqual(method, "POST")
+                self.assertEqual(data["tree"], "adopted-tree")
+                self.assertEqual(data["parents"], [BASE])
+                self.assertNotIn(OLD, data["parents"])
+                self.assertNotIn(SHA, data["parents"])
+                return {"sha": "adopted-commit"}
+            return {}
+
+        with patch.dict(release.os.environ, {"REPAIR_PR": "6", "REPAIR_HEAD": SHA}), \
+                patch.object(release, "configuration", return_value=(release.REPOSITORY, BASE)), \
+                patch.object(release, "active_repair", return_value=state), \
+                patch.object(release, "repair_diff", return_value=changed), \
+                patch.object(release, "check_review", return_value=(True, "ready")) as review, \
+                patch.object(release, "run", side_effect=git_boundary) as git, \
+                patch.object(release, "api", side_effect=github_boundary):
+            release.land(None)
+        self.assertEqual(review.call_count, 2)
+        self.assertEqual(git.call_count, len(changed))
 
     def test_smoke_runs_without_network_or_privileges_and_with_bounded_memory(self):
         command = release.runtime_command("sha256:" + "d" * 64, Path("/isolated/fixture"))
