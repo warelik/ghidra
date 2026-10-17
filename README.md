@@ -49,6 +49,8 @@ adopted, never `.repair` evidence or candidate history; adoption triggers a fres
 default-branch review and full build before publication. The original repair start
 travels with the trusted PR and its deadline is checked again before adoption;
 a task-start acknowledgement cannot advance an ordinary attempt.
+Pending exact-SHA review also waits without issuing another coding task;
+confirmed blocking findings and failed policy/land checks return to native repair.
 
 Draft PR #14 is the one-time bootstrap because the old default cannot recognize this
 trusted-update mode. Verify its exact head, run the full unit suite and rootless
