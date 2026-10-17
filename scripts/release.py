@@ -444,6 +444,22 @@ def coding_boundary(comments):
     return None
 
 
+def completed_unchanged_task(comments, head):
+    """A task-start acknowledgement is not a completed coding attempt."""
+    requested = [c.get("created_at") or "" for c in comments
+                 if c.get("user", {}).get("login") == REPOSITORY.split("/")[0]
+                 and c.get("user", {}).get("type") == "User"
+                 and (match := FIX_REQUEST.search(c.get("body") or ""))
+                 and match[1] == head]
+    if not requested:
+        return False
+    latest = max(requested)
+    return any(actor(c, completion=True)
+               and (c.get("created_at") or "") > latest
+               and (c.get("body") or "").startswith("### ")
+               for c in comments)
+
+
 def allowed_repair_paths(changes):
     if not changes:
         raise ValueError("Repair has no declarative case changes")
@@ -940,7 +956,12 @@ def request_repair(path):
                 "body": "Native packaging repair; application changes are forbidden.\n\n"
                         + "<!-- ghidra-repair:v1 " + json.dumps(state, separators=(",", ":")) + " -->"})
             state = {**state, "number": pull["number"], "head": seed}
+        current_comments = pages(f"repos/{repo}/issues/{state['number']}/comments")
         if any(FIX_REQUEST.search(c["body"])[1] == state["head"] for c in requests):
+            if not completed_unchanged_task(current_comments, state["head"]):
+                print(f"Native Codex task on #{state['number']} is still pending; "
+                      "no release published")
+                return
             if state.get("kind", "ordinary") == "ordinary":
                 trusted = begin_trusted_update(repo, state, evidence)
                 print(f"Escalated data-only repair to trusted configuration PR #{trusted['number']}; "

@@ -70,6 +70,19 @@ class DeclarativePolicyTests(unittest.TestCase):
         self.assertTrue(any(path.endswith("/pulls/10") and method == "PATCH"
                             for path, method, _data, _kwargs in calls))
 
+    def test_task_start_does_not_escalate_before_completion(self):
+        head = "a" * 40
+        request = {"created_at": "2026-01-01T00:00:00Z",
+                   "user": {"login": "warelik", "type": "User"},
+                   "body": f"@codex fix\n<!-- ghidra-fix:{head}:1 -->"}
+        bot = {"created_at": "2026-01-01T00:00:01Z",
+               "user": {"login": release.BOT, "type": "Bot"},
+               "performed_via_github_app": {"slug": release.APP},
+               "body": "Task started"}
+        self.assertFalse(release.completed_unchanged_task([request, bot], head))
+        self.assertTrue(release.completed_unchanged_task(
+            [request, {**bot, "body": "### Summary\nNo data-only fix"}], head))
+
 
 if __name__ == "__main__":
     unittest.main()

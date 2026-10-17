@@ -3,11 +3,11 @@ import sys
 import unittest
 
 
-COUNT = 39
+COUNT = 45
 COMPLETION = f"GHIDRA_BASELINE_COMPLETE:{COUNT}"
 
 
-suite = unittest.TestLoader().discover("scripts", pattern="test_release.py")
+suite = unittest.TestLoader().discover("scripts", pattern="test_*.py")
 if suite.countTestCases() != COUNT:
     raise RuntimeError(f"trusted baseline expected {COUNT} tests, found {suite.countTestCases()}")
 result = unittest.TextTestRunner(verbosity=2).run(suite)
