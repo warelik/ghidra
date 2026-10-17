@@ -422,8 +422,12 @@ class SupervisorRegressionTests(unittest.TestCase):
     """Exercise authority boundaries without trusting candidate status or markers."""
 
     def run_fixture(self, release_source, document, successful):
-        with tempfile.TemporaryDirectory(prefix="ghidra-supervisor-oracle-") as private, \
-                tempfile.TemporaryDirectory(prefix="ghidra-supervisor-worker-") as worker:
+        # Baseline TMPDIR is shared with the candidate for inert Path fixtures.
+        # Executable test fixtures must stay in the oracle-only HOME mount.
+        with tempfile.TemporaryDirectory(prefix="ghidra-supervisor-oracle-",
+                                         dir=os.environ["HOME"]) as private, \
+                tempfile.TemporaryDirectory(prefix="ghidra-supervisor-worker-",
+                                             dir=os.environ["HOME"]) as worker:
             oracle_root, worker_root = Path(private), Path(worker)
             candidate = worker_root / "candidate"
             candidate.mkdir()

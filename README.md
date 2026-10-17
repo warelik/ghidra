@@ -35,9 +35,10 @@ without write credentials and against trusted tests before selective adoption.
 The official application remains unmodified.
 
 The declarative-case supervisor is trusted configuration, not an ordinary repair.
-Its bootstrap must be merged from draft PR #14 only after exact-head review, rootless
-two-container integration, the full unit suite and the full build pass. The existing
-generic repair land command cannot adopt that transition. Afterward, ordinary repair
+Its bootstrap must be adopted from draft PR #14 only after exact-head review, rootless
+two-container integration and the full unit suite. The adopted configuration then
+requires a fresh review and full build before publication. The existing generic
+repair land command cannot adopt that transition. Afterward, ordinary repair
 branches may change only the packaging files listed in `AGENTS.md` and versioned
 `scripts/cases/*.json`; trusted Python tests and the supervisor remain immutable.
 
