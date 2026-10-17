@@ -347,6 +347,41 @@ class RepairAndRuntimeTests(unittest.TestCase):
                 self.assertRaisesRegex(ValueError, "runner budget exhausted"):
             release.enforce_runner_budget(now)
 
+    def test_runner_budget_skips_only_provably_old_completed_run_headers(self):
+        owner = {"login": "warelik", "type": "User"}
+        publication = {"draft": False, "prerelease": False,
+                       "published_at": "2026-01-01T00:00:00Z"}
+        request = {"user": owner, "created_at": "2026-01-02T00:00:00Z",
+                   "body": f"<!-- ghidra-fix:{SHA}:1 -->"}
+        old = [{"id": number, "run_attempt": 9, "status": "completed",
+                "updated_at": "2026-01-01T12:00:00Z"} for number in range(1, 501)]
+        overlap = {"id": 501, "run_attempt": 1, "status": "completed",
+                   "created_at": "2026-01-01T23:59:00Z", "updated_at": "2026-01-02T00:01:00Z"}
+        unknown = {"id": 502, "run_attempt": 1, "status": "completed"}
+        endpoints = []
+
+        def records(endpoint, **_kwargs):
+            endpoint = endpoint.split("&per_page=")[0].split("?per_page=")[0]
+            endpoints.append(endpoint)
+            if endpoint.endswith("/releases"):
+                return [publication]
+            if "/issues/comments" in endpoint:
+                return [request]
+            if endpoint.endswith("/runs"):
+                return old + [overlap, unknown]
+            return [{"id": int(endpoint.split("/runs/")[1].split("/")[0]),
+                     "status": "completed", "conclusion": "success",
+                     "started_at": "2026-01-01T23:59:30Z",
+                     "completed_at": "2026-01-02T00:00:30Z"}]
+
+        now = release.datetime.fromisoformat("2026-01-02T00:02:00+00:00")
+        with patch.object(release, "pages", side_effect=records):
+            self.assertEqual(release.enforce_runner_budget(now), 60)
+        job_endpoints = [item for item in endpoints if item.endswith("/jobs")]
+        self.assertEqual(len(job_endpoints), 2)
+        self.assertTrue(any("/runs/501/" in item for item in job_endpoints))
+        self.assertTrue(any("/runs/502/" in item for item in job_endpoints))
+
     def test_provider_lists_are_paginated_until_a_short_page(self):
         full = [{"id": item} for item in range(100)]
         with patch.object(release, "api", side_effect=[full, [{"id": 100}]]) as api:

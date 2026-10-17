@@ -367,6 +367,16 @@ def enforce_runner_budget(now=None):
     runs_path = f"repos/{REPOSITORY}/actions/workflows/release.yml/runs"
     jobs, seen = [], set()
     for workflow_run in pages(runs_path, list_field="workflow_runs"):
+        # updated_at is the authoritative run-level evidence that every attempt was
+        # already terminal before this repair began.  Missing or malformed headers
+        # are deliberately retained so an API/schema problem cannot erase usage.
+        updated_at = workflow_run.get("updated_at")
+        if workflow_run.get("status") == "completed" and isinstance(updated_at, str):
+            try:
+                if parse_github_time(updated_at, "run updated_at") < started:
+                    continue
+            except ValueError:
+                pass
         run_id, attempts = workflow_run.get("id"), workflow_run.get("run_attempt")
         if not isinstance(run_id, int) or run_id <= 0 or not isinstance(attempts, int) or attempts <= 0:
             raise ValueError("Missing or malformed GitHub Actions run identity")
@@ -904,22 +914,44 @@ def request_repair(path):
 
 
 def check_policy(candidate):
-    launcher = ("import sys,unittest;sys.path.insert(0,sys.argv[1]);import release;"
-                "suite=unittest.defaultTestLoader.discover(sys.argv[2],pattern='test_*.py');"
-                "sys.exit(not unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful())")
     for tests in (ROOT / "scripts", candidate / "scripts"):
-        with tempfile.TemporaryDirectory(prefix="ghidra-policy-tests-") as temporary:
-            root = Path(temporary)
-            command = ["docker", "run", "--rm", "--read-only", "--network=none", "--cap-drop=ALL",
-                       "--security-opt=no-new-privileges", "--memory=1g", "--cpus=2", "--pids-limit=256",
-                       "--user", f"{os.getuid()}:{os.getgid()}", "--workdir", str(root),
-                       "--env", f"HOME={root}", "--env", f"TMPDIR={root}",
-                       "--env", "PYTHONDONTWRITEBYTECODE=1"]
+        with tempfile.TemporaryDirectory(prefix="ghidra-policy-oracle-") as oracle_temp, \
+                tempfile.TemporaryDirectory(prefix="ghidra-policy-worker-") as worker_temp:
+            # Two containers give the candidate a distinct PID namespace.  It cannot ptrace or
+            # signal the trusted unittest process even though both use the invoking uid.  The only
+            # shared state is a pair of anonymous JSON pipes created by this trusted supervisor.
+            oracle_read, worker_write = os.pipe()
+            worker_read, oracle_write = os.pipe()
+            common = ["docker", "run", "--rm", "--interactive", "--read-only", "--network=none",
+                      "--cap-drop=ALL", "--security-opt=no-new-privileges", "--memory=1g", "--cpus=2",
+                      "--pids-limit=256", "--user", f"{os.getuid()}:{os.getgid()}",
+                      "--env", "PYTHONDONTWRITEBYTECODE=1"]
+            mounts = []
             for source in dict.fromkeys((ROOT.resolve(), candidate.resolve())):
-                command += ["--mount", f"type=bind,source={source},target={source},readonly"]
-            command += ["--mount", f"type=bind,source={root},target={root}", POLICY_IMAGE, "python3", "-B",
-                        "-c", launcher, str(candidate / "scripts"), str(tests)]
-            subprocess.run(command, check=True, timeout=300)
+                mounts += ["--mount", f"type=bind,source={source},target={source},readonly"]
+            supervisor = ROOT / "scripts/test_policy_supervisor.py"
+            worker_command = common + ["--workdir", worker_temp, "--env", f"HOME={worker_temp}",
+                                       "--env", f"TMPDIR={worker_temp}"] + mounts + [
+                "--mount", f"type=bind,source={worker_temp},target={worker_temp}", POLICY_IMAGE,
+                "python3", "-B", str(supervisor), "worker", str(candidate / "scripts")]
+            oracle_command = common + ["--workdir", oracle_temp, "--env", f"HOME={oracle_temp}",
+                                       "--env", f"TMPDIR={oracle_temp}"] + mounts + [
+                "--mount", f"type=bind,source={oracle_temp},target={oracle_temp}", POLICY_IMAGE,
+                "python3", "-B", str(supervisor), "oracle", str(candidate / "scripts"), str(tests)]
+            worker = subprocess.Popen(worker_command, stdin=worker_read, stdout=worker_write)
+            oracle = subprocess.Popen(oracle_command, stdin=oracle_read, stdout=oracle_write)
+            for descriptor in (oracle_read, oracle_write, worker_read, worker_write):
+                os.close(descriptor)
+            try:
+                if oracle.wait(timeout=300):
+                    raise subprocess.CalledProcessError(oracle.returncode, oracle_command)
+            finally:
+                worker.terminate()
+                try:
+                    worker.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    worker.kill()
+                    worker.wait()
     with tempfile.TemporaryDirectory(prefix="ghidra-actionlint-") as temporary:
         url = ("https://github.com/rhysd/actionlint/releases/download/v1.7.12/"
                "actionlint_1.7.12_linux_amd64.tar.gz")
