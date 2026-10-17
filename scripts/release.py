@@ -755,29 +755,30 @@ def failed_job_evidence(repo, run_id):
 def request_repair(path):
     repo, config = configuration()
     selected = selected_source() if os.environ.get("SELECTED_JSON") else select_release()
-    if os.environ.get("NONBLOCKING_FOLLOWUP") == "true":
-        pr = os.environ.get("REVIEW_PR")
-        evidence = "P2/P3 follow-up; existing publication remains valid.\n" + json.dumps(
-            minor_findings(int(pr), config) if pr else [], indent=2)[-20000:]
-    else:
-        evidence = failed_job_evidence(repo, os.environ["GITHUB_RUN_ID"])
-    published = [r for r in pages(f"repos/{repo}/releases") if not r["draft"] and not r["prerelease"]]
-    last_publication = max((r["id"] for r in published), default=0)
-    cycle = hashlib.sha256(f"{selected['upstream_sha']}:{last_publication}".encode()).hexdigest()
-    pulls = pages(f"repos/{repo}/pulls?state=all&base=downstream")
-    states = [state for pull in pulls if (state := repair_state(pull))
-              and state["cycle"] == cycle]
-    requests = []
-    boundaries = []
-    for state in states:
-        comments = pages(f"repos/{repo}/issues/{state['number']}/comments")
-        if state["config"] == config and (boundary := coding_boundary(comments)):
-            boundaries.append(boundary)
-        requests.extend(c for c in comments
-                        if c.get("user", {}).get("login") == "warelik"
-                        and c.get("user", {}).get("type") == "User"
-                        and FIX_REQUEST.search(c.get("body") or ""))
+    evidence = ""
     try:
+        if os.environ.get("NONBLOCKING_FOLLOWUP") == "true":
+            pr = os.environ.get("REVIEW_PR")
+            evidence = "P2/P3 follow-up; existing publication remains valid.\n" + json.dumps(
+                minor_findings(int(pr), config) if pr else [], indent=2)[-20000:]
+        else:
+            evidence = failed_job_evidence(repo, os.environ["GITHUB_RUN_ID"])
+        published = [r for r in pages(f"repos/{repo}/releases") if not r["draft"] and not r["prerelease"]]
+        last_publication = max((r["id"] for r in published), default=0)
+        cycle = hashlib.sha256(f"{selected['upstream_sha']}:{last_publication}".encode()).hexdigest()
+        pulls = pages(f"repos/{repo}/pulls?state=all&base=downstream")
+        states = [state for pull in pulls if (state := repair_state(pull))
+                  and state["cycle"] == cycle]
+        requests = []
+        boundaries = []
+        for state in states:
+            comments = pages(f"repos/{repo}/issues/{state['number']}/comments")
+            if state["config"] == config and (boundary := coding_boundary(comments)):
+                boundaries.append(boundary)
+            requests.extend(c for c in comments
+                            if c.get("user", {}).get("login") == "warelik"
+                            and c.get("user", {}).get("type") == "User"
+                            and FIX_REQUEST.search(c.get("body") or ""))
         owner_identity()
         if boundaries:
             raise ValueError(boundaries[0])
@@ -809,8 +810,8 @@ def request_repair(path):
         api(f"repos/{repo}/issues/{state['number']}/comments", method="POST", owner=True,
             data={"body": repair_prompt(state, len(requests) + 1, evidence)})
         print(f"Requested native Codex repair on #{state['number']}; no release published")
-    except ValueError as error:
-        escalation(config, selected, str(error) + "\n\n" + evidence)
+    except (ValueError, subprocess.TimeoutExpired) as error:
+        escalation(config, selected, str(error) + ("\n\n" + evidence if evidence else ""))
         raise
 
 

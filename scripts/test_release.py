@@ -235,6 +235,21 @@ class ReviewTests(unittest.TestCase):
 
 
 class RepairAndRuntimeTests(unittest.TestCase):
+    def test_repair_evidence_boundary_is_escalated(self):
+        source = selected()
+        for error in (ValueError("Job log API HTTP 403"),
+                      release.subprocess.TimeoutExpired(["gh", "api"], 60)):
+            with self.subTest(error=type(error).__name__), \
+                    patch.dict(release.os.environ, {"SELECTED_JSON": "selected",
+                                                   "NONBLOCKING_FOLLOWUP": "", "GITHUB_RUN_ID": "7"}), \
+                    patch.object(release, "configuration", return_value=(release.REPOSITORY, BASE)), \
+                    patch.object(release, "selected_source", return_value=source), \
+                    patch.object(release, "failed_job_evidence", side_effect=error), \
+                    patch.object(release, "escalation") as escalation:
+                with self.assertRaises(type(error)):
+                    release.request_repair(None)
+                escalation.assert_called_once_with(BASE, source, str(error))
+
     def test_job_evidence_reads_completed_failed_jobs_not_running_workflow_logs(self):
         response = {"jobs": [
             {"id": 1, "name": "still running repair", "status": "in_progress", "conclusion": None},
