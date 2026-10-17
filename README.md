@@ -50,10 +50,7 @@ the standard entrypoint for direct Python scripts.
 Use `downstream` as the default branch with Actions enabled. Enable the native
 Codex GitHub integration for this repository and provide `CODEX_REQUEST_TOKEN`
 from the existing repository owner's authorization for owner-authored requests.
-Native review and native coding are separate capabilities. Also create a
-[Codex Cloud environment for this repository](https://chatgpt.com/codex/cloud/settings/environments)
-and verify that a coding task can push an actual repair to its PR branch.
-A completed review alone does not prove that coding capability.
+Native review and native coding are separate capabilities. For the native GitHub coding workflow, create a [Codex Cloud (Legacy) environment for this repository](https://chatgpt.com/codex/settings/environments) and verify that a coding task can push an actual repair to its PR branch. OpenAI's [current environment guide](https://learn.chatgpt.com/docs/environments/cloud-environments) states that GitHub integrations and reviews still use Legacy during the transition. A newly published Cloud environment is a separate setup, not a substitute for this workflow's Legacy environment. A completed review alone does not prove coding capability.
 No VPS access or deployment credentials belong in this repository.
 
 Run **Upstream Plus Packaging**. Build, publication, installation and validation
