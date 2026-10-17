@@ -241,7 +241,8 @@ class RepairAndRuntimeTests(unittest.TestCase):
         owner = {"login": "warelik", "type": "User"}
         endpoints = []
 
-        def records(endpoint):
+        def records(endpoint, **_kwargs):
+            endpoint = endpoint.split("&per_page=")[0].split("?per_page=")[0]
             endpoints.append(endpoint)
             if endpoint == f"repos/{release.REPOSITORY}/releases":
                 return [{"draft": False, "prerelease": False, "published_at": publication},
@@ -255,7 +256,8 @@ class RepairAndRuntimeTests(unittest.TestCase):
                     {"user": {"login": "someone", "type": "User"}, "created_at": request,
                      "body": f"<!-- ghidra-fix:{SHA}:1 -->"}]
             if endpoint == f"repos/{release.REPOSITORY}/actions/workflows/release.yml/runs":
-                return [{"id": 10, "run_attempt": 2}, {"id": 11, "run_attempt": 1}]
+                return {"workflow_runs": [{"id": 10, "run_attempt": 2},
+                                          {"id": 11, "run_attempt": 1}]}
             jobs = {
                 f"repos/{release.REPOSITORY}/actions/runs/10/attempts/1/jobs": [
                     {"id": 1, "status": "completed", "conclusion": "failure",
@@ -272,10 +274,10 @@ class RepairAndRuntimeTests(unittest.TestCase):
                      "started_at": "2026-01-01T01:50:00Z", "completed_at": None},
                     {"id": 5, "status": "queued", "conclusion": None,
                      "started_at": None, "completed_at": None}]}
-            return jobs[endpoint]
+            return {"jobs": jobs[endpoint]}
 
         now = release.datetime.fromisoformat("2026-01-01T02:00:00+00:00")
-        with patch.object(release, "pages", side_effect=records):
+        with patch.object(release, "api", side_effect=records):
             self.assertEqual(release.enforce_runner_budget(now), 1500)
         self.assertIn(f"repos/{release.REPOSITORY}/actions/runs/10/attempts/1/jobs", endpoints)
         self.assertIn(f"repos/{release.REPOSITORY}/actions/runs/10/attempts/2/jobs", endpoints)
@@ -312,17 +314,44 @@ class RepairAndRuntimeTests(unittest.TestCase):
         self.assertEqual(api.call_args_list[0].args[0], "provider/list?filter=all&per_page=100&page=1")
         self.assertEqual(api.call_args_list[1].args[0], "provider/list?filter=all&per_page=100&page=2")
 
+        with patch.object(release, "api", side_effect=[
+                {"jobs": full}, {"jobs": [{"id": 100}]}]):
+            self.assertEqual(len(release.pages("provider/jobs", list_field="jobs")), 101)
+        for response in ({}, {"jobs": {}}, []):
+            with self.subTest(response=response), patch.object(release, "api", return_value=response), \
+                    self.assertRaises(ValueError):
+                release.pages("provider/jobs", list_field="jobs")
+
     def test_cli_budget_boundary_blocks_exhaustion_but_not_high_attempt_count(self):
         target = "/tmp/unused"
-        for command in ("prepare", "repair"):
-            with self.subTest(command=command), \
-                    patch.object(release.sys, "argv", ["release.py", command, target]), \
-                    patch.object(release, "enforce_runner_budget",
-                                 side_effect=ValueError("Cumulative runner budget exhausted")), \
-                    patch.object(release, command if command == "prepare" else "request_repair") as handler, \
-                    self.assertRaisesRegex(ValueError, "runner budget exhausted"):
+        with patch.object(release.sys, "argv", ["release.py", "prepare", target]), \
+                patch.object(release, "enforce_runner_budget",
+                             side_effect=ValueError("Cumulative runner budget exhausted")), \
+                patch.object(release, "prepare") as handler, \
+                self.assertRaisesRegex(ValueError, "runner budget exhausted"):
+            release.main()
+        handler.assert_not_called()
+
+        source = selected()
+        issue = {"number": 9, "body": f"<!-- ghidra-escalation:{source['upstream_sha']} -->",
+                 "user": {"login": "warelik"}}
+        for message in ("Cumulative runner budget exhausted", "GitHub request failed: HTTP 403"):
+            with self.subTest(message=message), \
+                    patch.object(release.sys, "argv", ["release.py", "repair", target]), \
+                    patch.dict(release.os.environ, {"SELECTED_JSON": "selected"}), \
+                    patch.object(release, "enforce_runner_budget", side_effect=ValueError(message)), \
+                    patch.object(release, "configuration", return_value=(release.REPOSITORY, BASE)) as config, \
+                    patch.object(release, "selected_source", return_value=source) as selection, \
+                    patch.object(release, "pages", return_value=[issue]), \
+                    patch.object(release, "api") as api, \
+                    patch.object(release, "request_repair") as handler, \
+                    self.assertRaisesRegex(ValueError, message):
                 release.main()
+            config.assert_called_once_with()
+            selection.assert_called_once_with()
             handler.assert_not_called()
+            api.assert_called_once_with(f"repos/{release.REPOSITORY}/issues/9/comments",
+                                        method="POST", data=unittest.mock.ANY)
         with patch.object(release.sys, "argv", ["release.py", "repair", target]), \
                 patch.object(release, "enforce_runner_budget", return_value=3599) as budget, \
                 patch.object(release, "request_repair") as handler:

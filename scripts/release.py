@@ -65,11 +65,15 @@ def api(path, *, method="GET", data=None, owner=False, missing=False):
     return json.loads(result.stdout) if result.stdout.strip() else None
 
 
-def pages(path):
+def pages(path, *, list_field=None):
     result = []
     separator = "&" if "?" in path else "?"
     for page in range(1, 1001):
         batch = api(f"{path}{separator}per_page=100&page={page}")
+        if list_field is not None:
+            if not isinstance(batch, dict) or list_field not in batch:
+                raise ValueError(f"Expected GitHub pagination field {list_field}")
+            batch = batch[list_field]
         if not isinstance(batch, list):
             raise ValueError("Expected a paginated GitHub list")
         result.extend(batch)
@@ -357,13 +361,13 @@ def enforce_runner_budget(now=None):
     started = min(requests)
     runs_path = f"repos/{REPOSITORY}/actions/workflows/release.yml/runs"
     jobs, seen = [], set()
-    for workflow_run in pages(runs_path):
+    for workflow_run in pages(runs_path, list_field="workflow_runs"):
         run_id, attempts = workflow_run.get("id"), workflow_run.get("run_attempt")
         if not isinstance(run_id, int) or run_id <= 0 or not isinstance(attempts, int) or attempts <= 0:
             raise ValueError("Missing or malformed GitHub Actions run identity")
         for attempt in range(1, attempts + 1):
             endpoint = f"repos/{REPOSITORY}/actions/runs/{run_id}/attempts/{attempt}/jobs"
-            for job in pages(endpoint):
+            for job in pages(endpoint, list_field="jobs"):
                 job_id = job.get("id")
                 if not isinstance(job_id, int) or job_id <= 0:
                     raise ValueError("Missing or malformed GitHub Actions job identity")
@@ -964,8 +968,16 @@ def main():
     parser.add_argument("command", choices=commands)
     parser.add_argument("path", type=Path)
     args = parser.parse_args()
-    if args.command in {"prepare", "repair"}:
+    if args.command == "prepare":
         enforce_runner_budget()
+    elif args.command == "repair":
+        try:
+            enforce_runner_budget()
+        except ValueError as error:
+            repo, config = configuration()
+            selected = selected_source() if os.environ.get("SELECTED_JSON") else select_release()
+            escalation(config, selected, str(error))
+            raise
     commands[args.command](args.path.resolve())
 
 
