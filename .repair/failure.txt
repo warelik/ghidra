@@ -1,0 +1,7 @@
+Fresh bounded repair after initial Legacy execution access was provisioned.
+The previous task in PR #6 stopped because no Legacy repository environment existed; it did not deliver code. Its expired request window is not reused.
+
+The trusted configuration remains 4e33ecce2413835f282fd221c927ef7cd133030d. Its known P2 defect calls failed_job_evidence before request_repair's escalation boundary, so log API denial or timeout loses the repair/escalation result.
+The VPS contract additionally forbids stopping solely because an arbitrary number of checks or coding attempts was reached. The existing 7200-second elapsed limit, source identity, no-blind-rerun and all verification gates must remain.
+
+Already-authored, regression-tested changes are e454931712ff9521a2252bb8fecb97f4af62a88d and 8a76bf2a4cbe7906311ed1914e81f03f234540cf. Their exact combined two-file diff is .repair/prepared.patch. Twenty-six packaging tests passed for that snapshot. This is preparation, not evidence that native coding, push, review or adoption passed.
