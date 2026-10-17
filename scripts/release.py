@@ -1,4 +1,6 @@
 import argparse
+import base64
+import binascii
 from datetime import datetime, timezone
 import hashlib
 import io
@@ -849,8 +851,30 @@ def repair_prompt(state, attempt, evidence):
     )
 
 
+def original_failure_evidence(repo, state):
+    """Read the immutable failure recorded in the ordinary repair seed."""
+    if not SHA.fullmatch(state["seed"]):
+        raise ValueError("Original failure seed is not an exact commit")
+    record = api(f"repos/{repo}/contents/.repair/failure.txt?ref={state['seed']}")
+    if not isinstance(record, dict):
+        raise ValueError("Original repair failure evidence is missing or malformed")
+    size, encoded = record.get("size"), record.get("content")
+    if (record.get("type") != "file" or record.get("encoding") != "base64"
+            or type(size) is not int or not 0 < size <= 65536 or not isinstance(encoded, str)):
+        raise ValueError("Original repair failure evidence is missing or malformed")
+    try:
+        raw = base64.b64decode("".join(encoded.split()), validate=True)
+        decoded = raw.decode("utf-8")
+    except (binascii.Error, UnicodeError, ValueError) as error:
+        raise ValueError("Original repair failure evidence cannot be decoded") from error
+    if len(raw) != size:
+        raise ValueError("Original repair failure evidence size changed")
+    return decoded
+
+
 def begin_trusted_update(repo, state, evidence, started_at):
     """Replace an exhausted data-only attempt with a separate machine-owned code PR."""
+    original = original_failure_evidence(repo, state)
     branch = f"repair/trusted-{state['config'][:12]}-{state['upstream'][:12]}"
     ensure_ref(repo, branch, state["config"])
     trusted = {key: state[key] for key in ("schema", "config", "seed", "upstream",
@@ -862,12 +886,16 @@ def begin_trusted_update(repo, state, evidence, started_at):
         "title": "Trusted Ghidra packaging configuration update",
         "base": "downstream", "head": branch,
         "body": ("Machine-created trusted-configuration update; exact pushed source requires native "
-                 "review and credential-free verification before selective adoption.\n\n"
+                 "review and credential-free verification before selective adoption.\n"
+                 f"Original ordinary repair PR #{state['number']}, evidence seed `{state['seed']}`.\n\n"
                  "<!-- ghidra-repair:v1 " + json.dumps(trusted, separators=(",", ":")) + " -->")})
     trusted.update(number=pull["number"], head=state["config"], branch=branch)
     api(f"repos/{repo}/pulls/{state['number']}", method="PATCH", data={"state": "closed"})
+    context = ("Latest attempt result:\n" + evidence[-3000:] +
+               f"\n\nOriginal failure from PR #{state['number']} seed `{state['seed']}`:\n" +
+               original[-18000:])
     api(f"repos/{repo}/issues/{pull['number']}/comments", method="POST", owner=True,
-        data={"body": repair_prompt(trusted, 1, evidence)})
+        data={"body": repair_prompt(trusted, 1, context)})
     return trusted
 
 

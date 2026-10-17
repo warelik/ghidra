@@ -51,6 +51,8 @@ travels with the trusted PR and its deadline is checked again before adoption;
 a task-start acknowledgement cannot advance an ordinary attempt.
 Pending exact-SHA review also waits without issuing another coding task;
 confirmed blocking findings and failed policy/land checks return to native repair.
+Promotion carries the original immutable failure text from the ordinary seed and
+links the old PR, so a later generic waiting message cannot erase the repair target.
 
 Draft PR #14 is the one-time bootstrap because the old default cannot recognize this
 trusted-update mode. Verify its exact head, run the full unit suite and rootless

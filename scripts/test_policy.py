@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import json
 from contextlib import redirect_stdout
@@ -64,9 +65,13 @@ class DeclarativePolicyTests(unittest.TestCase):
         def api(path, method="GET", data=None, **kwargs):
             calls.append((path, method, data, kwargs))
             return {"number": 11} if path.endswith("/pulls") and method == "POST" else {}
-        with patch.object(release, "ensure_ref") as ref, patch.object(release, "api", side_effect=api):
+        with patch.object(release, "ensure_ref") as ref, \
+                patch.object(release, "original_failure_evidence",
+                             return_value="Original archive verification failure") as original, \
+                patch.object(release, "api", side_effect=api):
             trusted = release.begin_trusted_update(
                 release.REPOSITORY, state, "failure", "2026-01-01T00:00:00Z")
+        original.assert_called_once_with(release.REPOSITORY, state)
         ref.assert_called_once_with(release.REPOSITORY, "repair/trusted-aaaaaaaaaaaa-cccccccccccc",
                                     "a" * 40)
         self.assertEqual(trusted["kind"], "trusted")
@@ -75,6 +80,24 @@ class DeclarativePolicyTests(unittest.TestCase):
         self.assertEqual(trusted["number"], 11)
         self.assertTrue(any(path.endswith("/pulls/10") and method == "PATCH"
                             for path, method, _data, _kwargs in calls))
+        prompt = next(data["body"] for path, method, data, _kwargs in calls
+                      if path.endswith("/issues/11/comments") and method == "POST")
+        self.assertIn("Original archive verification failure", prompt)
+        self.assertIn("Original failure from PR #10", prompt)
+
+    def test_original_failure_is_read_from_exact_seed(self):
+        raw = b"Official archive checksum mismatch"
+        record = {"type": "file", "encoding": "base64", "size": len(raw),
+                  "content": base64.b64encode(raw).decode("ascii")}
+        state = {"seed": "a" * 40}
+        with patch.object(release, "api", return_value=record) as api:
+            self.assertEqual(release.original_failure_evidence(release.REPOSITORY, state),
+                             raw.decode("utf-8"))
+        api.assert_called_once_with(
+            f"repos/{release.REPOSITORY}/contents/.repair/failure.txt?ref={'a' * 40}")
+        with patch.object(release, "api", return_value={**record, "size": len(raw) + 1}), \
+                self.assertRaises(ValueError):
+            release.original_failure_evidence(release.REPOSITORY, state)
 
     def test_task_start_does_not_escalate_before_completion(self):
         head = "a" * 40
