@@ -64,11 +64,13 @@ class DeclarativePolicyTests(unittest.TestCase):
             calls.append((path, method, data, kwargs))
             return {"number": 11} if path.endswith("/pulls") and method == "POST" else {}
         with patch.object(release, "ensure_ref") as ref, patch.object(release, "api", side_effect=api):
-            trusted = release.begin_trusted_update(release.REPOSITORY, state, "failure")
+            trusted = release.begin_trusted_update(
+                release.REPOSITORY, state, "failure", "2026-01-01T00:00:00Z")
         ref.assert_called_once_with(release.REPOSITORY, "repair/trusted-aaaaaaaaaaaa-cccccccccccc",
                                     "a" * 40)
         self.assertEqual(trusted["kind"], "trusted")
         self.assertEqual(trusted["seed"], "a" * 40)
+        self.assertEqual(trusted["started_at"], "2026-01-01T00:00:00Z")
         self.assertEqual(trusted["number"], 11)
         self.assertTrue(any(path.endswith("/pulls/10") and method == "PATCH"
                             for path, method, _data, _kwargs in calls))
@@ -85,6 +87,20 @@ class DeclarativePolicyTests(unittest.TestCase):
         self.assertFalse(release.completed_unchanged_task([request, bot], head))
         self.assertTrue(release.completed_unchanged_task(
             [request, {**bot, "body": "### Summary\nNo data-only fix"}], head))
+
+    def test_trusted_state_requires_original_repair_start(self):
+        state = {"schema": 1, "kind": "trusted", "config": "a" * 40,
+                 "seed": "a" * 40, "upstream": "b" * 40,
+                 "upstream_release_id": 7, "cycle": "c" * 64}
+        pull = {"number": 10, "user": {"login": "warelik"},
+                "head": {"sha": "d" * 40, "ref": "repair/trusted-test",
+                         "repo": {"full_name": release.REPOSITORY}},
+                "body": "<!-- ghidra-repair:v1 " + json.dumps(state) + " -->"}
+        with self.assertRaises(ValueError):
+            release.repair_state(pull)
+        state["started_at"] = "2026-01-01T00:00:00Z"
+        pull["body"] = "<!-- ghidra-repair:v1 " + json.dumps(state) + " -->"
+        self.assertEqual(release.repair_state(pull)["started_at"], state["started_at"])
 
 
 if __name__ == "__main__":

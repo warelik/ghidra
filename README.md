@@ -45,7 +45,9 @@ reviewed candidate's normal unittest suite and declarative evaluator without wri
 credentials. Source review is the authority for that trusted program—tests cannot
 prove actively malicious source honest. Only allowlisted configuration blobs are
 adopted, never `.repair` evidence or candidate history; adoption triggers a fresh
-default-branch review and full build before publication.
+default-branch review and full build before publication. The original repair start
+travels with the trusted PR and its deadline is checked again before adoption;
+a task-start acknowledgement cannot advance an ordinary attempt.
 
 Draft PR #14 is the one-time bootstrap because the old default cannot recognize this
 trusted-update mode. Verify its exact head, run the full unit suite and rootless

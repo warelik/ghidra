@@ -420,6 +420,8 @@ def repair_state(pull):
             or any(not SHA.fullmatch(state.get(k, "")) for k in ("config", "seed", "upstream"))
             or not DIGEST.fullmatch(state.get("cycle", ""))):
         raise ValueError("Invalid repair state")
+    if state.get("kind") == "trusted":
+        parse_github_time(state.get("started_at"), "original repair start")
     return {**state, "number": pull["number"], "head": pull["head"]["sha"],
             "branch": pull["head"]["ref"]}
 
@@ -515,6 +517,8 @@ def prepare(path):
            selection=json.dumps(selected, separators=(",", ":")), upstream=selected["upstream_sha"],
            version=selected["version"], release=release_tag(selected, config), repair_pr="", repair_head="")
     if state:
+        if state.get("kind") == "trusted":
+            enforce_deadline(state["started_at"])
         if selected["upstream_sha"] != state["upstream"]:
             raise ValueError("Repair official release identity changed")
         comments = pages(f"repos/{repo}/issues/{state['number']}/comments")
@@ -827,7 +831,7 @@ def repair_prompt(state, attempt, evidence):
     )
 
 
-def begin_trusted_update(repo, state, evidence):
+def begin_trusted_update(repo, state, evidence, started_at):
     """Replace an exhausted data-only attempt with a separate machine-owned code PR."""
     branch = f"repair/trusted-{state['config'][:12]}-{state['upstream'][:12]}"
     ensure_ref(repo, branch, state["config"])
@@ -835,6 +839,7 @@ def begin_trusted_update(repo, state, evidence):
                                             "upstream_release_id", "cycle")}
     trusted["kind"] = "trusted"
     trusted["seed"] = state["config"]
+    trusted["started_at"] = started_at
     pull = api(f"repos/{repo}/pulls", method="POST", owner=True, data={
         "title": "Trusted Ghidra packaging configuration update",
         "base": "downstream", "head": branch,
@@ -963,7 +968,8 @@ def request_repair(path):
                       "no release published")
                 return
             if state.get("kind", "ordinary") == "ordinary":
-                trusted = begin_trusted_update(repo, state, evidence)
+                trusted = begin_trusted_update(
+                    repo, state, evidence, min(c["created_at"] for c in requests))
                 print(f"Escalated data-only repair to trusted configuration PR #{trusted['number']}; "
                       "no release published")
                 return
@@ -1011,6 +1017,8 @@ def land(path):
     if (state is None or state["number"] != int(os.environ["REPAIR_PR"])
             or state["head"] != os.environ["REPAIR_HEAD"]):
         raise ValueError("Repair changed after read-only verification")
+    if state.get("kind") == "trusted":
+        enforce_deadline(state["started_at"])
     changed = repair_diff(state)
     ready, reason = check_review(state["number"], state["head"], config)
     if not ready:
