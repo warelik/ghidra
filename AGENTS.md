@@ -26,21 +26,22 @@ image ID, labels, official distribution identity, packaging revision and the
 empty patch-set digest. Publish one checked image archive, provenance and
 checksums without replacing a published asset. Publication is not installation.
 
-Ordinary packaging failures belong to native Codex repair. Repair only
-`scripts/release.py`, `scripts/smoke.py`, `.github/workflows/release.yml`, and
-declarative `scripts/cases/*.json` regression cases. Proposed cases contain
-literal arguments and expected values or named exceptions; only the reviewed
-trusted configuration interprets them. Never import or execute candidate test
-modules or let candidate code decide whether an assertion passed. The trusted
-Python test suite and its interpreter are changed only by a separate, reviewed
-configuration update, then protected from ordinary repair candidates. Do not
+Ordinary packaging failures belong to native Codex repair. Ordinary untrusted
+repair candidates may change only declarative `scripts/cases/*.json` regression
+data: literal arguments and expected values or named exceptions, interpreted
+by the trusted configuration. A code or workflow fix uses a separate native
+Codex trusted-configuration update from the current default branch. Machines
+create, review, verify and adopt that update, then run a fresh default review
+and full build; the owner does not perform those steps manually. Python tests,
+packaging code, the case interpreter and workflow are never executable inputs
+from an ordinary repair candidate. Do not
 add application patches, features, controllers or queues. Do not weaken tests,
 review prompts, criteria, integrity, isolation or publication controls to make
 a build pass.
 
 Test proposed repairs without write credentials, against both the trusted Python
-suite and proposed declarative cases. Recheck exact-SHA review and selectively adopt only the verified
-packaging/test files; never merge `.repair/` evidence into the default branch.
+suite and proposed declarative cases. Recheck exact-SHA review and selectively
+adopt only verified files; never merge `.repair/` evidence into the default branch.
 The adopted configuration requires a fresh review and build. Bound repair by
 elapsed time and resource budgets; reaching a check or attempt count alone is
 not a reason to stop or escalate. Preserve the last verified release and escalate
