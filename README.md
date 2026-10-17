@@ -94,7 +94,10 @@ the standard entrypoint for direct Python scripts.
 
 Use `downstream` as the default branch with Actions enabled. Enable the native
 Codex GitHub integration for this repository and provide `CODEX_REQUEST_TOKEN`
-from the existing repository owner's authorization for owner-authored requests.
+from the existing repository owner's authorization. Trusted default-branch jobs
+use it for paginated GitHub API reads and owner-authored requests because the
+installation token's API quota can be exhausted by the bounded runner-history
+audit. The credential-free repair policy job never receives it.
 No VPS access or deployment credentials belong in this repository.
 
 Run **Upstream Plus Packaging**. Build, publication, installation and validation

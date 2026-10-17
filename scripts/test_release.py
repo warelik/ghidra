@@ -654,6 +654,7 @@ class RepairAndRuntimeTests(unittest.TestCase):
         policy = workflow.split("\n  policy-check:", 1)[1].split("\n  build:", 1)[0]
         self.assertNotIn("CODEX_REQUEST_TOKEN", policy)
         self.assertNotIn("contents: write", policy)
+        self.assertEqual(workflow.count("GH_TOKEN: ${{ secrets.CODEX_REQUEST_TOKEN }}"), 5)
         self.assertIn("persist-credentials: false", policy)
         self.assertIn("trusted/scripts/release.py check-policy", policy)
         self.assertIn("needs: [prepare, policy-check]", workflow)

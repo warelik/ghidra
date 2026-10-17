@@ -74,7 +74,7 @@ jobs:
       - name: Select One Complete Official Release
         id: select
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.CODEX_REQUEST_TOKEN }}
           CODEX_REQUEST_TOKEN: ${{ secrets.CODEX_REQUEST_TOKEN }}
         run: python3 scripts/release.py prepare "$RUNNER_TEMP/selection.json"
       - name: Report Actual State
@@ -141,7 +141,7 @@ jobs:
           persist-credentials: false
       - name: Build Upstream Container Without Application Patches
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.CODEX_REQUEST_TOKEN }}
           SELECTED_JSON: ${{ needs.prepare.outputs.selection }}
         run: python3 scripts/release.py build "$RUNNER_TEMP/release"
       - uses: actions/upload-artifact@v4
@@ -170,7 +170,7 @@ jobs:
           path: release
       - name: Publish Only The Tested Image
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.CODEX_REQUEST_TOKEN }}
           SELECTED_JSON: ${{ needs.prepare.outputs.selection }}
           REVIEW_PR: ${{ needs.prepare.outputs.pr }}
           REVIEW_BASE: ${{ needs.prepare.outputs.review_base }}
@@ -195,7 +195,7 @@ jobs:
           persist-credentials: false
       - name: Adopt The Exact Reviewed And Tested Repair
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.CODEX_REQUEST_TOKEN }}
           CODEX_REQUEST_TOKEN: ${{ secrets.CODEX_REQUEST_TOKEN }}
           REPAIR_PR: ${{ needs.prepare.outputs.repair_pr }}
           REPAIR_HEAD: ${{ needs.prepare.outputs.repair_head }}
@@ -222,7 +222,7 @@ jobs:
           persist-credentials: false
       - name: Request A Real Fix Without Application Patches Or Deployment
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.CODEX_REQUEST_TOKEN }}
           CODEX_REQUEST_TOKEN: ${{ secrets.CODEX_REQUEST_TOKEN }}
           SELECTED_JSON: ${{ needs.prepare.outputs.selection }}
           REVIEW_PR: ${{ needs.prepare.outputs.pr }}
