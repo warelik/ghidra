@@ -1,0 +1,214 @@
+name: Upstream Plus Packaging
+
+on:
+  schedule:
+    - cron: "23 */6 * * *"
+  workflow_dispatch:
+  push:
+    branches: [downstream]
+    paths: ["scripts/**", ".github/workflows/release.yml"]
+  issue_comment:
+    types: [created, edited]
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-plus-packaging
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Select Official Release And Review Exact Packaging
+    if: >-
+      (github.event_name != 'issue_comment' &&
+       github.event_name != 'pull_request_target') ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request &&
+       github.event.comment.user.login == 'chatgpt-codex-connector[bot]' &&
+       github.event.comment.user.type == 'Bot') ||
+      (github.event_name == 'pull_request_target' &&
+       github.event.pull_request.base.ref == 'downstream' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       startsWith(github.event.pull_request.head.ref, 'repair/'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      ready: ${{ steps.select.outputs.ready }}
+      mode: ${{ steps.select.outputs.mode }}
+      selection: ${{ steps.select.outputs.selection }}
+      pr: ${{ steps.select.outputs.pr }}
+      review_base: ${{ steps.select.outputs.review_base }}
+      repair_pr: ${{ steps.select.outputs.repair_pr }}
+      repair_head: ${{ steps.select.outputs.repair_head }}
+      followup: ${{ steps.select.outputs.followup }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Require Trusted Default Branch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          test "$GITHUB_REF" = refs/heads/downstream
+          test "$DEFAULT_BRANCH" = downstream
+      - name: Test Release Contracts
+        run: python3 -B -m unittest discover -s scripts -p 'test_*.py' -v
+      - name: Select One Complete Official Release
+        id: select
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CODEX_REQUEST_TOKEN: ${{ secrets.CODEX_REQUEST_TOKEN }}
+        run: python3 scripts/release.py prepare "$RUNNER_TEMP/selection.json"
+      - name: Report Actual State
+        if: always()
+        env:
+          READY: ${{ steps.select.outputs.ready }}
+          MODE: ${{ steps.select.outputs.mode }}
+          REASON: ${{ steps.select.outputs.reason }}
+          PR: ${{ steps.select.outputs.pr }}
+        run: |
+          {
+            echo "### Official Ghidra plus packaging"
+            printf '%s\n' "- State: ${MODE:-failed before selection}: ${REASON:-inspect the failed step}"
+            printf '%s\n' "- Review accepted: ${READY:-false}"
+            if [ -n "$PR" ]; then printf '%s\n' "- Exact-source review PR: #$PR"; fi
+            echo "- Application patch set is empty. GitHub does not deploy to the VPS."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  pending:
+    name: External Review Or Repair Is Not Verification
+    needs: prepare
+    if: needs.prepare.outputs.mode == 'waiting'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 1
+    steps:
+      - run: |
+          echo "::error::Waiting for native Codex review or implementation; no candidate has passed verification."
+          exit 1
+
+  policy-check:
+    name: Check Repair Against Trusted Tests Without Write Credentials
+    needs: prepare
+    if: needs.prepare.outputs.ready == 'true' && needs.prepare.outputs.mode == 'repair'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: trusted
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.repair_head }}
+          path: candidate
+          persist-credentials: false
+      - name: Run Trusted And Proposed Tests In Read-Only Containers
+        run: python3 trusted/scripts/release.py check-policy "$GITHUB_WORKSPACE/candidate"
+
+  build:
+    name: Build Official Distribution And Prove PyGhidra Persistence
+    needs: prepare
+    if: needs.prepare.outputs.ready == 'true' && needs.prepare.outputs.mode == 'build'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Build Upstream Container Without Application Patches
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SELECTED_JSON: ${{ needs.prepare.outputs.selection }}
+        run: python3 scripts/release.py build "$RUNNER_TEMP/release"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: verified-${{ github.sha }}
+          path: ${{ runner.temp }}/release/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Recheck Exact Review And Publish Without Deployment
+    needs: [prepare, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: verified-${{ github.sha }}
+          path: release
+      - name: Publish Only The Tested Image
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SELECTED_JSON: ${{ needs.prepare.outputs.selection }}
+          REVIEW_PR: ${{ needs.prepare.outputs.pr }}
+          REVIEW_BASE: ${{ needs.prepare.outputs.review_base }}
+        run: python3 scripts/release.py publish "$GITHUB_WORKSPACE/release"
+
+  land:
+    name: Adopt Only Verified Packaging Changes And Restart Verification
+    needs: [prepare, policy-check]
+    if: >-
+      needs.prepare.outputs.ready == 'true' &&
+      needs.prepare.outputs.mode == 'repair'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Adopt The Exact Reviewed And Tested Repair
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CODEX_REQUEST_TOKEN: ${{ secrets.CODEX_REQUEST_TOKEN }}
+          REPAIR_PR: ${{ needs.prepare.outputs.repair_pr }}
+          REPAIR_HEAD: ${{ needs.prepare.outputs.repair_head }}
+        run: python3 scripts/release.py land "$RUNNER_TEMP/land"
+
+  repair:
+    name: Native Codex Repair Or Explicit Bounded Escalation
+    needs: [prepare, policy-check, build, publish, land]
+    if: >-
+      always() &&
+      (contains(needs.*.result, 'failure') ||
+       needs.prepare.outputs.followup == 'true')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Request A Real Fix Without Application Patches Or Deployment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CODEX_REQUEST_TOKEN: ${{ secrets.CODEX_REQUEST_TOKEN }}
+          SELECTED_JSON: ${{ needs.prepare.outputs.selection }}
+          REVIEW_PR: ${{ needs.prepare.outputs.pr }}
+          NONBLOCKING_FOLLOWUP: ${{ !contains(needs.*.result, 'failure') && needs.prepare.outputs.followup == 'true' }}
+        run: python3 scripts/release.py repair "$RUNNER_TEMP/repair"

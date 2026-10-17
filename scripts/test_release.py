@@ -1,0 +1,248 @@
+import copy
+import hashlib
+import json
+import os
+from pathlib import Path
+import tempfile
+import unittest
+from unittest.mock import patch
+import zipfile
+
+import release
+
+
+SHA = "1" * 40
+BASE = "2" * 40
+WHEN = "2026-01-01T00:00:00Z"
+BOT = {"login": release.BOT, "type": "Bot"}
+APP = {"slug": release.APP}
+
+
+def selected(version="12.1.4"):
+    name = f"ghidra_{version}_PUBLIC_20260921.zip"
+    tag = f"Ghidra_{version}_build"
+    return {"version": version, "upstream_tag": tag, "upstream_sha": SHA,
+            "upstream_release_id": 7, "asset": {"name": name, "sha256": "a" * 64, "size": 1234,
+            "url": f"https://github.com/{release.UPSTREAM}/releases/download/{tag}/{name}"}}
+
+
+def provenance():
+    source = selected()
+    return {"schema": 1, "repository": release.REPOSITORY,
+            "upstream_repository": release.UPSTREAM, "version": source["version"],
+            "upstream_tag": source["upstream_tag"], "upstream_sha": source["upstream_sha"],
+            "config_sha": BASE, "patchset_sha256": hashlib.sha256(b"").hexdigest(),
+            "platform": "linux/amd64", "image_id": "sha256:" + "b" * 64,
+            "asset": {"name": source["asset"]["name"], "sha256": source["asset"]["sha256"]},
+            "archive": {"name": "ghidra-image.tar.gz", "sha256": "c" * 64}}
+
+
+class SourceTests(unittest.TestCase):
+    def test_official_two_and_three_component_versions(self):
+        for version in ("12.1.4", "12.2"):
+            with self.subTest(version=version):
+                value = selected(version)
+                self.assertEqual(release.validate_selection(value), value)
+                self.assertEqual(release.release_tag(value, BASE),
+                                 f"build-{version}-{SHA[:12]}-{BASE[:12]}")
+
+    def test_selection_cannot_redirect_or_change_archive_identity(self):
+        mutations = [
+            lambda s: s.update(upstream_tag="master"),
+            lambda s: s.update(upstream_sha="master"),
+            lambda s: s.update(version="12.1.4-preview"),
+            lambda s: s["asset"].update(url="https://example.invalid/ghidra.zip"),
+            lambda s: s["asset"].update(sha256=""),
+            lambda s: s["asset"].update(size=2**31),
+            lambda s: s["asset"].update(name="../archive.zip"),
+            lambda s: s["asset"].update(extra="untrusted"),
+            lambda s: s.update(patches=["application.patch"]),
+        ]
+        for mutate in mutations:
+            value = selected()
+            mutate(value)
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                release.validate_selection(value)
+
+    def test_latest_release_must_be_official_stable_and_checksummed(self):
+        source = selected()
+        record = {"id": 7, "tag_name": source["upstream_tag"], "draft": False, "prerelease": False,
+                  "assets": [{"name": source["asset"]["name"], "size": 1234,
+                              "digest": "sha256:" + "a" * 64,
+                              "browser_download_url": source["asset"]["url"]}]}
+        with patch.object(release, "commit_ref", return_value=SHA):
+            self.assertEqual(release.select_release(record), source)
+            for changes in ({"draft": True}, {"prerelease": True}, {"tag_name": "master"}, {"assets": []}):
+                with self.subTest(changes=changes), self.assertRaises(ValueError):
+                    release.select_release({**record, **changes})
+            for changes in ({"digest": None}, {"size": 0}, {"browser_download_url": "https://example.invalid"}):
+                broken = copy.deepcopy(record)
+                broken["assets"][0].update(changes)
+                with self.subTest(changes=changes), self.assertRaises(ValueError):
+                    release.select_release(broken)
+
+    def test_empty_patchset_is_explicit_and_provenance_fails_closed(self):
+        self.assertEqual(release.EMPTY_PATCHSET, hashlib.sha256(b"").hexdigest())
+        release.validate_provenance(provenance(), selected(), BASE)
+        for key in ("schema", "repository", "upstream_repository", "version", "upstream_tag",
+                    "upstream_sha", "config_sha", "patchset_sha256", "platform", "image_id", "asset", "archive"):
+            bad = provenance()
+            bad[key] = None
+            with self.subTest(key=key), self.assertRaises((ValueError, TypeError)):
+                release.validate_provenance(bad, selected(), BASE)
+        bad = provenance()
+        bad["patchset_sha256"] = "d" * 64
+        with self.assertRaises(ValueError):
+            release.validate_provenance(bad, selected(), BASE)
+
+    def test_unsafe_distribution_members_never_escape_destination(self):
+        for member in ("../escape", "/absolute", "ghidra/../../escape", "ghidra\\escape"):
+            with self.subTest(member=member), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                archive = root / "distribution.zip"
+                with zipfile.ZipFile(archive, "w") as stream:
+                    stream.writestr(member, b"untrusted")
+                with self.assertRaises(ValueError):
+                    release.extract_distribution(archive, root / "expanded")
+                self.assertFalse((root / "escape").exists())
+
+    def test_official_file_permissions_preserved_without_symlinks(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive = root / "distribution.zip"
+            executable = zipfile.ZipInfo("ghidra/support/analyzeHeadless")
+            executable.external_attr = 0o100755 << 16
+            with zipfile.ZipFile(archive, "w") as stream:
+                stream.writestr(executable, b"executable fixture")
+            result = release.extract_distribution(archive, root / "expanded")
+            self.assertEqual((result / "support/analyzeHeadless").stat().st_mode & 0o777, 0o755)
+            with zipfile.ZipFile(root / "symlink.zip", "w") as stream:
+                link = zipfile.ZipInfo("ghidra/link")
+                link.external_attr = 0o120777 << 16
+                stream.writestr(link, "outside")
+            with self.assertRaises(ValueError):
+                release.extract_distribution(root / "symlink.zip", root / "linked")
+
+    def test_annotated_tag_is_resolved_to_commit_and_missing_identity_rejected(self):
+        replies = [{"object": {"type": "tag", "sha": BASE}},
+                   {"object": {"type": "commit", "sha": SHA}}]
+        with patch.object(release, "api", side_effect=replies):
+            self.assertEqual(release.commit_ref(release.UPSTREAM, "tags/example"), SHA)
+        with patch.object(release, "api", return_value={"object": {"type": "tree", "sha": SHA}}):
+            with self.assertRaises(ValueError):
+                release.commit_ref(release.UPSTREAM, "tags/example")
+
+
+class ReviewTests(unittest.TestCase):
+    def gate(self, *, reviews=(), inline=(), comments=(), resolve=lambda _: SHA):
+        return release.review_gate(SHA, WHEN, list(reviews), list(inline), list(comments), resolve)
+
+    def approved(self, **changes):
+        return {"user": BOT, "commit_id": SHA, "state": "APPROVED",
+                "submitted_at": WHEN, "id": 1, **changes}
+
+    def native(self, state=None, **changes):
+        state = state or {"commit_sha": SHA, "status": "completed",
+                          "has_any_findings": False, "has_unresolved_findings": False}
+        return {"user": BOT, "performed_via_github_app": APP, "updated_at": WHEN,
+                "body": "<!-- codex-review-state:v1 " + json.dumps({"code_review": state}) + " -->", **changes}
+
+    def test_exact_authenticated_approval_or_native_completion_passes(self):
+        self.assertTrue(self.gate(reviews=[self.approved()])[0])
+        self.assertTrue(self.gate(comments=[self.native()])[0])
+
+    def test_reactions_reports_stale_reviews_and_spoofed_actors_fail(self):
+        self.assertFalse(self.gate()[0])
+        cases = [self.approved(commit_id=BASE),
+                 self.approved(user={"login": release.BOT, "type": "User"}),
+                 self.approved(submitted_at="2025-01-01T00:00:00Z"),
+                 self.approved(state="CHANGES_REQUESTED"),
+                 self.approved(performed_via_github_app={"slug": "other-app"})]
+        for record in cases:
+            with self.subTest(record=record):
+                self.assertFalse(self.gate(reviews=[record])[0])
+        self.assertFalse(self.gate(comments=[self.native(performed_via_github_app=None)])[0])
+        self.assertFalse(self.gate(comments=[self.native(body="Task acknowledged; looks good")])[0])
+
+    def test_unresolved_major_finding_blocks_even_positive_review(self):
+        finding = {"user": BOT, "commit_id": SHA, "body": "[P1] Integrity bypass"}
+        self.assertFalse(self.gate(reviews=[self.approved()], inline=[finding])[0])
+        finding["body"] = "[P2] Nonblocking follow-up"
+        self.assertTrue(self.gate(reviews=[self.approved()], inline=[finding])[0])
+
+    def test_incomplete_ambiguous_or_stale_completion_does_not_pass(self):
+        for state in ({"commit_sha": BASE, "status": "completed", "has_any_findings": False,
+                       "has_unresolved_findings": False},
+                      {"commit_sha": SHA, "status": "in_progress", "has_any_findings": False,
+                       "has_unresolved_findings": False},
+                      {"commit_sha": SHA, "status": "completed", "has_any_findings": True,
+                       "has_unresolved_findings": True}):
+            with self.subTest(state=state):
+                self.assertFalse(self.gate(comments=[self.native(state)])[0])
+        self.assertFalse(self.gate(comments=[self.native(updated_at="2025-01-01T00:00:00Z")])[0])
+
+    def test_pull_head_base_and_repository_identity_are_checked(self):
+        pull = {"state": "open", "head": {"sha": SHA, "repo": {"full_name": release.REPOSITORY}},
+                "base": {"sha": BASE, "repo": {"full_name": release.REPOSITORY}}}
+        mutations = [lambda p: p["head"].update(sha=BASE),
+                     lambda p: p["base"].update(sha=SHA),
+                     lambda p: p["head"]["repo"].update(full_name="someone/ghidra"),
+                     lambda p: p["base"]["repo"].update(full_name="someone/ghidra")]
+        for mutate in mutations:
+            value = copy.deepcopy(pull)
+            mutate(value)
+            with patch.object(release, "api", return_value=value):
+                self.assertFalse(release.check_review(1, SHA, BASE)[0])
+
+    def test_deadline_is_finite(self):
+        with self.assertRaises(ValueError):
+            release.enforce_deadline("2000-01-01T00:00:00Z")
+
+
+class RepairAndRuntimeTests(unittest.TestCase):
+    def test_repair_never_changes_application_or_removes_tests(self):
+        release.allowed_repair_paths({"scripts/release.py": "100644", "scripts/test_new.py": "100644"})
+        for changes in ({}, {"Ghidra/application.properties": "100644"},
+                        {"docker/Dockerfile": "100644"}, {"AGENTS.md": "100644"},
+                        {"scripts/test_release.py": None}, {"scripts/release.py": "120000"},
+                        {".repair/failure.txt": "100644"}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                release.allowed_repair_paths(changes)
+
+    def test_public_untrusted_pull_cannot_inject_repair_state(self):
+        pull = {"body": "<!-- ghidra-repair:v1 malicious -->",
+                "user": {"login": "untrusted"}, "head": {"ref": "repair/fake",
+                "repo": {"full_name": "untrusted/fork"}}}
+        self.assertIsNone(release.repair_state(pull))
+
+    def test_smoke_runs_without_network_or_privileges_and_with_bounded_memory(self):
+        command = release.runtime_command("sha256:" + "d" * 64, Path("/isolated/fixture"))
+        for flag in ("--read-only", "--network=none", "--cap-drop=ALL",
+                     "--security-opt=no-new-privileges", "--memory=4g", "--cpus=2", "--pids-limit=512"):
+            self.assertIn(flag, command)
+        self.assertIn("JAVA_TOOL_OPTIONS=-Xmx2g", command)
+        self.assertNotIn("--privileged", command)
+        self.assertFalse(any("docker.sock" in part or "podman.sock" in part for part in command))
+        self.assertTrue(command[-1].endswith("/smoke.py"))
+
+    def test_workflow_keeps_untrusted_code_in_read_only_job(self):
+        workflow = (release.ROOT / ".github/workflows/release.yml").read_text()
+        policy = workflow.split("\n  policy-check:", 1)[1].split("\n  build:", 1)[0]
+        self.assertNotIn("CODEX_REQUEST_TOKEN", policy)
+        self.assertNotIn("contents: write", policy)
+        self.assertIn("persist-credentials: false", policy)
+        self.assertIn("trusted/scripts/release.py check-policy", policy)
+        self.assertIn("needs: [prepare, policy-check]", workflow)
+        self.assertIn("cancel-in-progress: false", workflow)
+
+    def test_smoke_contract_contains_real_engine_and_persistence_operations(self):
+        smoke = (release.ROOT / "scripts/smoke.py").read_text()
+        for operation in ("pyghidra.start()", "pyghidra.analyze(program)", "decompileFunction(",
+                          "getReferencesTo(", "setName(", "setComment(", "program.save("):
+            self.assertIn(operation, smoke)
+        self.assertGreaterEqual(smoke.count("pyghidra.open_project("), 2)
+        self.assertIn("assert persisted is not None", smoke)
+
+
+if __name__ == "__main__":
+    unittest.main()
