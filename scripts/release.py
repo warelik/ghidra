@@ -33,6 +33,7 @@ REPAIR_STATE = re.compile(r"<!-- ghidra-repair:v1 (\{[^\n]+\}) -->")
 FIX_REQUEST = re.compile(r"<!-- ghidra-fix:([0-9a-f]{40}):([1-9][0-9]*) -->")
 WAITING = "Pending authenticated exact-SHA Codex review; nothing verified or published"
 DEADLINE_SECONDS = 7200
+RUNNER_BUDGET_SECONDS = 3600
 TERMINAL_ESCAPE_REFUSAL = (
     "the response contains terminal escape sequences; "
     "pass --allow-escape-sequences to output it anyway"
@@ -317,6 +318,77 @@ def enforce_deadline(started):
     created = datetime.fromisoformat(started.replace("Z", "+00:00"))
     if (datetime.now(timezone.utc) - created).total_seconds() >= DEADLINE_SECONDS:
         raise ValueError("Two-hour Codex task/review deadline exhausted")
+
+
+def parse_github_time(value, field):
+    if not isinstance(value, str):
+        raise ValueError(f"Missing or malformed GitHub Actions {field}")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError(f"Missing or malformed GitHub Actions {field}") from error
+    if parsed.tzinfo is None:
+        raise ValueError(f"Missing or malformed GitHub Actions {field}")
+    return parsed.astimezone(timezone.utc)
+
+
+def enforce_runner_budget(now=None):
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        raise ValueError("Runner-budget clock must include a timezone")
+    now = now.astimezone(timezone.utc)
+    publications = [release for release in pages(f"repos/{REPOSITORY}/releases")
+                    if not release.get("draft") and not release.get("prerelease")]
+    published = max((parse_github_time(release.get("published_at"), "publication timestamp")
+                     for release in publications), default=None)
+    comments_path = f"repos/{REPOSITORY}/issues/comments"
+    if published:
+        comments_path += "?" + urlencode({"since": published.isoformat()})
+    requests = []
+    for comment in pages(comments_path):
+        user = comment.get("user") or {}
+        if (user.get("login") == REPOSITORY.split("/")[0] and user.get("type") == "User"
+                and FIX_REQUEST.search(comment.get("body") or "")):
+            created = parse_github_time(comment.get("created_at"), "repair-request timestamp")
+            if published is None or created > published:
+                requests.append(created)
+    if not requests:
+        return 0
+    started = min(requests)
+    runs_path = f"repos/{REPOSITORY}/actions/workflows/release.yml/runs"
+    jobs, seen = [], set()
+    for workflow_run in pages(runs_path):
+        run_id, attempts = workflow_run.get("id"), workflow_run.get("run_attempt")
+        if not isinstance(run_id, int) or run_id <= 0 or not isinstance(attempts, int) or attempts <= 0:
+            raise ValueError("Missing or malformed GitHub Actions run identity")
+        for attempt in range(1, attempts + 1):
+            endpoint = f"repos/{REPOSITORY}/actions/runs/{run_id}/attempts/{attempt}/jobs"
+            for job in pages(endpoint):
+                job_id = job.get("id")
+                if not isinstance(job_id, int) or job_id <= 0:
+                    raise ValueError("Missing or malformed GitHub Actions job identity")
+                if job_id not in seen:
+                    seen.add(job_id)
+                    jobs.append(job)
+    consumed = 0
+    for job in jobs:
+        if job.get("conclusion") == "skipped" or (job.get("status") == "queued" and not job.get("started_at")):
+            continue
+        job_started = parse_github_time(job.get("started_at"), "job started_at")
+        if job.get("status") == "completed":
+            completed = parse_github_time(job.get("completed_at"), "job completed_at")
+        elif job.get("status") in {"in_progress", "waiting", "pending", "requested"}:
+            completed = now
+        else:
+            raise ValueError("Missing or malformed GitHub Actions job status")
+        begin, end = max(job_started, started), min(completed, now)
+        if completed < job_started or job_started > now:
+            raise ValueError("Malformed GitHub Actions job timestamps")
+        if end > begin:
+            consumed += (end - begin).total_seconds()
+    if consumed >= RUNNER_BUDGET_SECONDS:
+        raise ValueError(f"Cumulative runner budget exhausted ({int(consumed)} seconds)")
+    return consumed
 
 
 def minor_findings(pr, sha):
@@ -892,6 +964,8 @@ def main():
     parser.add_argument("command", choices=commands)
     parser.add_argument("path", type=Path)
     args = parser.parse_args()
+    if args.command in {"prepare", "repair"}:
+        enforce_runner_budget()
     commands[args.command](args.path.resolve())
 
 

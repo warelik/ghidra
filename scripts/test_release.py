@@ -235,6 +235,101 @@ class ReviewTests(unittest.TestCase):
 
 
 class RepairAndRuntimeTests(unittest.TestCase):
+    def test_runner_budget_counts_all_attempts_jobs_and_clipped_running_time(self):
+        publication = "2026-01-01T00:00:00Z"
+        request = "2026-01-01T01:00:00Z"
+        owner = {"login": "warelik", "type": "User"}
+        endpoints = []
+
+        def records(endpoint):
+            endpoints.append(endpoint)
+            if endpoint == f"repos/{release.REPOSITORY}/releases":
+                return [{"draft": False, "prerelease": False, "published_at": publication},
+                        {"draft": True, "prerelease": False, "published_at": None}]
+            if endpoint.startswith(f"repos/{release.REPOSITORY}/issues/comments?"):
+                return [
+                    {"user": owner, "created_at": "2025-12-31T23:00:00Z",
+                     "body": f"<!-- ghidra-fix:{SHA}:8 -->"},
+                    {"user": owner, "created_at": request,
+                     "body": f"<!-- ghidra-fix:{SHA}:9 -->"},
+                    {"user": {"login": "someone", "type": "User"}, "created_at": request,
+                     "body": f"<!-- ghidra-fix:{SHA}:1 -->"}]
+            if endpoint == f"repos/{release.REPOSITORY}/actions/workflows/release.yml/runs":
+                return [{"id": 10, "run_attempt": 2}, {"id": 11, "run_attempt": 1}]
+            jobs = {
+                f"repos/{release.REPOSITORY}/actions/runs/10/attempts/1/jobs": [
+                    {"id": 1, "status": "completed", "conclusion": "failure",
+                     "started_at": "2026-01-01T00:50:00Z", "completed_at": "2026-01-01T01:10:00Z"},
+                    {"id": 2, "status": "completed", "conclusion": "skipped",
+                     "started_at": None, "completed_at": None}],
+                f"repos/{release.REPOSITORY}/actions/runs/10/attempts/2/jobs": [
+                    {"id": 3, "status": "completed", "conclusion": "success",
+                     "started_at": "2026-01-01T01:20:00Z", "completed_at": "2026-01-01T01:25:00Z"}],
+                f"repos/{release.REPOSITORY}/actions/runs/11/attempts/1/jobs": [
+                    {"id": 1, "status": "completed", "conclusion": "failure",
+                     "started_at": "2026-01-01T00:50:00Z", "completed_at": "2026-01-01T01:10:00Z"},
+                    {"id": 4, "status": "in_progress", "conclusion": None,
+                     "started_at": "2026-01-01T01:50:00Z", "completed_at": None},
+                    {"id": 5, "status": "queued", "conclusion": None,
+                     "started_at": None, "completed_at": None}]}
+            return jobs[endpoint]
+
+        now = release.datetime.fromisoformat("2026-01-01T02:00:00+00:00")
+        with patch.object(release, "pages", side_effect=records):
+            self.assertEqual(release.enforce_runner_budget(now), 1500)
+        self.assertIn(f"repos/{release.REPOSITORY}/actions/runs/10/attempts/1/jobs", endpoints)
+        self.assertIn(f"repos/{release.REPOSITORY}/actions/runs/10/attempts/2/jobs", endpoints)
+
+    def test_runner_budget_fails_closed_for_denial_and_malformed_metrics(self):
+        publication = {"draft": False, "prerelease": False,
+                       "published_at": "2026-01-01T00:00:00Z"}
+        request = {"user": {"login": "warelik", "type": "User"},
+                   "created_at": "2026-01-01T01:00:00Z",
+                   "body": f"<!-- ghidra-fix:{SHA}:1 -->"}
+        run = {"id": 10, "run_attempt": 1}
+        denied = ValueError("GitHub request failed: HTTP 403")
+        with patch.object(release, "pages", side_effect=[[publication], [request], denied]), \
+                self.assertRaisesRegex(ValueError, "HTTP 403"):
+            release.enforce_runner_budget()
+        malformed = {"id": 1, "status": "completed", "conclusion": "success",
+                     "started_at": "not-a-time", "completed_at": "2026-01-01T01:01:00Z"}
+        with patch.object(release, "pages", side_effect=[[publication], [request], [run], [malformed]]), \
+                self.assertRaisesRegex(ValueError, "malformed"):
+            release.enforce_runner_budget()
+        exhausted = {"id": 1, "status": "completed", "conclusion": "success",
+                     "started_at": "2026-01-01T01:00:00Z",
+                     "completed_at": "2026-01-01T02:00:00Z"}
+        now = release.datetime.fromisoformat("2026-01-01T03:00:00+00:00")
+        with patch.object(release, "pages", side_effect=[
+                [publication], [request], [run], [exhausted]]), \
+                self.assertRaisesRegex(ValueError, "runner budget exhausted"):
+            release.enforce_runner_budget(now)
+
+    def test_provider_lists_are_paginated_until_a_short_page(self):
+        full = [{"id": item} for item in range(100)]
+        with patch.object(release, "api", side_effect=[full, [{"id": 100}]]) as api:
+            self.assertEqual(len(release.pages("provider/list?filter=all")), 101)
+        self.assertEqual(api.call_args_list[0].args[0], "provider/list?filter=all&per_page=100&page=1")
+        self.assertEqual(api.call_args_list[1].args[0], "provider/list?filter=all&per_page=100&page=2")
+
+    def test_cli_budget_boundary_blocks_exhaustion_but_not_high_attempt_count(self):
+        target = "/tmp/unused"
+        for command in ("prepare", "repair"):
+            with self.subTest(command=command), \
+                    patch.object(release.sys, "argv", ["release.py", command, target]), \
+                    patch.object(release, "enforce_runner_budget",
+                                 side_effect=ValueError("Cumulative runner budget exhausted")), \
+                    patch.object(release, command if command == "prepare" else "request_repair") as handler, \
+                    self.assertRaisesRegex(ValueError, "runner budget exhausted"):
+                release.main()
+            handler.assert_not_called()
+        with patch.object(release.sys, "argv", ["release.py", "repair", target]), \
+                patch.object(release, "enforce_runner_budget", return_value=3599) as budget, \
+                patch.object(release, "request_repair") as handler:
+            release.main()
+        budget.assert_called_once_with()
+        handler.assert_called_once()
+
     def test_attempt_count_never_replaces_elapsed_budget(self):
         source = selected()
         cycle = release.hashlib.sha256(f"{source['upstream_sha']}:0".encode()).hexdigest()
