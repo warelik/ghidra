@@ -47,7 +47,8 @@ class DeclarativePolicyTests(unittest.TestCase):
         release.allowed_trusted_paths({"scripts/release.py": "100644",
                                        ".github/workflows/release.yml": "100644",
                                        "scripts/test_release.py": "100644"})
-        for path in ("app/Dockerfile", ".repair/failure.txt", "Ghidra/x", "scripts/evil.py"):
+        for path in ("AGENTS.md", "app/Dockerfile", ".repair/failure.txt",
+                     "Ghidra/x", "scripts/evil.py"):
             with self.subTest(path=path), self.assertRaises(ValueError):
                 release.allowed_trusted_paths({path: "100644"})
 

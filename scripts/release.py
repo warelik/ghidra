@@ -452,7 +452,7 @@ def allowed_repair_paths(changes):
             raise ValueError(f"Ordinary repair may contain regular declarative case data only: {path}")
 
 
-TRUSTED_PATHS = {"AGENTS.md", "README.md", ".github/workflows/release.yml",
+TRUSTED_PATHS = {"README.md", ".github/workflows/release.yml",
                  "scripts/release.py", "scripts/smoke.py", "scripts/test_release.py",
                  "scripts/baseline_runner.py", "scripts/case_runner.py", "scripts/policy_runner.py"}
 

@@ -59,7 +59,7 @@ maintenance. The official application remains unmodified.
 The reviewed bootstrap operation is a non-forced ref update, after replacing
 `REVIEWED_SHA` with the full PR head verified by both `git ls-remote` and the native
 review: `gh api --method PATCH repos/warelik/ghidra/git/refs/heads/downstream
---input - <<<\'{"sha":"REVIEWED_SHA","force":false}\'`. Immediately read the ref
+-f sha=REVIEWED_SHA -F force=false`. Immediately read the ref
 back and dispatch `release.yml` on `downstream`. Do not run this operation before the
 review and rootless container check, and do not merge or mark draft PR #14 ready.
 
