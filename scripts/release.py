@@ -18,6 +18,7 @@ import zipfile
 ROOT = Path(__file__).resolve().parent.parent
 REPOSITORY = "warelik/ghidra"
 UPSTREAM = "NationalSecurityAgency/ghidra"
+BASELINE = "41d2bb84cf1e63841abeb5721034b3977032c8a5"
 EMPTY_PATCHSET = hashlib.sha256(b"").hexdigest()
 SHA = re.compile(r"[0-9a-f]{40}")
 DIGEST = re.compile(r"[0-9a-f]{64}")
@@ -122,8 +123,18 @@ def ensure_ref(repo, branch, sha):
         raise ValueError(f"Ref changed; refusing to overwrite {branch}")
 
 
+def packaging_base(config):
+    if not SHA.fullmatch(config) or config == BASELINE:
+        raise ValueError("Packaging requires a nonempty configuration commit")
+    comparison = api(f"repos/{REPOSITORY}/compare/{BASELINE}...{config}")
+    if (comparison.get("status") != "ahead"
+            or comparison.get("merge_base_commit", {}).get("sha") != BASELINE):
+        raise ValueError("Packaging must descend from the unchanged empty review baseline")
+    return BASELINE
+
+
 def select_release(release=None):
-    record = release or api(f"repos/{UPSTREAM}/releases/latest")
+    record = release if release is not None else api(f"repos/{UPSTREAM}/releases/latest")
     match = re.fullmatch(r"Ghidra_(\d+\.\d+(?:\.\d+)?)_build", record.get("tag_name", ""))
     if not match or record.get("draft") or record.get("prerelease"):
         raise ValueError("Expected a complete stable official Ghidra release")
@@ -400,10 +411,7 @@ def prepare(path):
     if mirror != upstream_master:
         api(f"repos/{repo}/git/refs/heads/master", method="PATCH",
             data={"sha": upstream_master, "force": False})
-    parents = api(f"repos/{repo}/commits/{config}")["parents"]
-    if len(parents) != 1:
-        raise ValueError("Packaging configuration must have one reviewable parent")
-    base = parents[0]["sha"]
+    base = packaging_base(config)
     pr, ready, reason = request_review(config, base)
     output(pr=pr, review_base=base, reason=reason)
     if not ready:
@@ -588,6 +596,17 @@ def verify_remote_release(release, selected, config):
                 raise ValueError("Published asset integrity mismatch")
 
 
+def verify_uploaded_assets(records, directory):
+    assets = {a["name"]: a for a in records}
+    if len(records) != len(ASSETS) or set(assets) != ASSETS:
+        raise ValueError("Uploaded release assets are missing, duplicate or unexpected")
+    for name in ASSETS:
+        path = directory / name
+        if (assets[name].get("digest") != f"sha256:{digest(path)}"
+                or assets[name].get("size") != path.stat().st_size):
+            raise ValueError("Uploaded asset does not match the tested artifact")
+
+
 def publish(directory):
     repo, config = configuration()
     selected = selected_source()
@@ -626,12 +645,7 @@ def publish(directory):
         path = directory / name
         if name not in assets:
             run("gh", "release", "upload", tag, str(path), "--repo", repo)
-    uploaded = {a["name"]: a for a in pages(f"repos/{repo}/releases/{release['id']}/assets")}
-    for name in ASSETS:
-        path = directory / name
-        if (uploaded.get(name, {}).get("digest") != f"sha256:{digest(path)}"
-                or uploaded[name].get("size") != path.stat().st_size):
-            raise ValueError("Uploaded asset does not match the tested artifact")
+    verify_uploaded_assets(pages(f"repos/{repo}/releases/{release['id']}/assets"), directory)
     ref = api(f"repos/{repo}/git/ref/tags/{tag}", missing=True)
     if ref is None:
         api(f"repos/{repo}/git/refs", method="POST", data={"ref": f"refs/tags/{tag}", "sha": config})
@@ -798,6 +812,10 @@ def land(path):
     adopted = api(f"repos/{repo}/git/commits", method="POST", data={
         "message": f"Adopt verified packaging repair from #{state['number']}",
         "tree": tree, "parents": [config]})["sha"]
+    configuration()
+    ready, reason = check_review(state["number"], state["head"], config)
+    if not ready:
+        raise ValueError(reason)
     api(f"repos/{repo}/git/refs/heads/downstream", method="PATCH", owner=True,
         data={"sha": adopted, "force": False})
     api(f"repos/{repo}/issues/{state['number']}/comments", method="POST",

@@ -81,6 +81,12 @@ class SourceTests(unittest.TestCase):
                 with self.subTest(changes=changes), self.assertRaises(ValueError):
                     release.select_release(broken)
 
+    def test_invalid_explicit_release_never_falls_back_to_latest(self):
+        with patch.object(release, "api") as api:
+            with self.assertRaises(ValueError):
+                release.select_release({})
+            api.assert_not_called()
+
     def test_empty_patchset_is_explicit_and_provenance_fails_closed(self):
         self.assertEqual(release.EMPTY_PATCHSET, hashlib.sha256(b"").hexdigest())
         release.validate_provenance(provenance(), selected(), BASE)
@@ -131,6 +137,23 @@ class SourceTests(unittest.TestCase):
         with patch.object(release, "api", return_value={"object": {"type": "tree", "sha": SHA}}):
             with self.assertRaises(ValueError):
                 release.commit_ref(release.UPSTREAM, "tags/example")
+
+    def test_uploaded_asset_set_is_exact_and_every_file_is_checksummed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in release.ASSETS:
+                (root / name).write_text(name)
+            records = [{"name": name, "size": (root / name).stat().st_size,
+                        "digest": "sha256:" + release.digest(root / name)} for name in release.ASSETS]
+            release.verify_uploaded_assets(records, root)
+            for bad in (records[:-1], records + [records[0]], records + [{"name": "extra"}]):
+                with self.subTest(bad=bad), self.assertRaises(ValueError):
+                    release.verify_uploaded_assets(bad, root)
+            for key, value in (("size", 0), ("digest", "sha256:" + "0" * 64)):
+                bad = copy.deepcopy(records)
+                bad[0][key] = value
+                with self.subTest(key=key), self.assertRaises(ValueError):
+                    release.verify_uploaded_assets(bad, root)
 
 
 class ReviewTests(unittest.TestCase):
@@ -198,6 +221,18 @@ class ReviewTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             release.enforce_deadline("2000-01-01T00:00:00Z")
 
+    def test_every_normal_review_covers_complete_packaging_not_unreviewed_parent(self):
+        self.assertEqual(release.BASELINE, "41d2bb84cf1e63841abeb5721034b3977032c8a5")
+        with patch.object(release, "api", return_value={
+                "status": "ahead", "merge_base_commit": {"sha": release.BASELINE}}) as api:
+            self.assertEqual(release.packaging_base(SHA), release.BASELINE)
+            api.assert_called_once_with(
+                f"repos/{release.REPOSITORY}/compare/{release.BASELINE}...{SHA}")
+        for response in ({"status": "behind", "merge_base_commit": {"sha": release.BASELINE}},
+                         {"status": "ahead", "merge_base_commit": {"sha": BASE}}):
+            with patch.object(release, "api", return_value=response), self.assertRaises(ValueError):
+                release.packaging_base(SHA)
+
 
 class RepairAndRuntimeTests(unittest.TestCase):
     def test_repair_never_changes_application_or_removes_tests(self):
@@ -234,6 +269,7 @@ class RepairAndRuntimeTests(unittest.TestCase):
         self.assertIn("trusted/scripts/release.py check-policy", policy)
         self.assertIn("needs: [prepare, policy-check]", workflow)
         self.assertIn("cancel-in-progress: false", workflow)
+        self.assertIn("format('ignored-{0}', github.run_id)", workflow)
 
     def test_smoke_contract_contains_real_engine_and_persistence_operations(self):
         smoke = (release.ROOT / "scripts/smoke.py").read_text()
