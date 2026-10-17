@@ -50,6 +50,10 @@ the standard entrypoint for direct Python scripts.
 Use `downstream` as the default branch with Actions enabled. Enable the native
 Codex GitHub integration for this repository and provide `CODEX_REQUEST_TOKEN`
 from the existing repository owner's authorization for owner-authored requests.
+Native review and native coding are separate capabilities. Also create a
+[Codex Cloud environment for this repository](https://chatgpt.com/codex/cloud/settings/environments)
+and verify that a coding task can push an actual repair to its PR branch.
+A completed review alone does not prove that coding capability.
 No VPS access or deployment credentials belong in this repository.
 
 Run **Upstream Plus Packaging**. Build, publication, installation and validation
