@@ -348,6 +348,18 @@ def active_repair(config):
     return None
 
 
+def coding_boundary(comments):
+    latest_request = max((c.get("created_at") or "" for c in comments
+                          if c.get("user", {}).get("login") == "warelik"
+                          and c.get("user", {}).get("type") == "User"
+                          and FIX_REQUEST.search(c.get("body") or "")), default="")
+    if any(actor(c) and re.search(r"To use Codex here,.*create an environment", c.get("body") or "")
+           and (c.get("created_at") or "") >= latest_request
+           for c in comments):
+        return "Native Codex coding environment is missing; repository-owner configuration is required"
+    return None
+
+
 def allowed_repair_paths(changes):
     allowed = {"scripts/release.py", "scripts/smoke.py", ".github/workflows/release.yml"}
     if not changes:
@@ -389,6 +401,8 @@ def prepare(path):
         if selected["upstream_sha"] != state["upstream"]:
             raise ValueError("Repair official release identity changed")
         comments = pages(f"repos/{repo}/issues/{state['number']}/comments")
+        if boundary := coding_boundary(comments):
+            raise ValueError(boundary)
         requests = [c for c in comments if c.get("user", {}).get("login") == "warelik"
                     and FIX_REQUEST.search(c.get("body") or "")]
         if not requests:
@@ -705,16 +719,48 @@ def escalation(config, selected, evidence):
                   "body": body, "assignees": ["warelik"]})
 
 
+def failed_job_evidence(repo, run_id):
+    if repo != REPOSITORY or not re.fullmatch(r"[1-9][0-9]*", run_id):
+        raise ValueError("Failure evidence requires this repository and an exact workflow run ID")
+    failed = []
+    for page in range(1, 1001):
+        response = api(f"repos/{repo}/actions/runs/{run_id}/jobs?filter=latest&per_page=100&page={page}")
+        batch = response.get("jobs")
+        if not isinstance(batch, list):
+            raise ValueError("Unexpected workflow-job response")
+        failed.extend(j for j in batch if j.get("status") == "completed"
+                      and j.get("conclusion") in {"failure", "timed_out", "cancelled",
+                                                 "action_required", "startup_failure"})
+        if len(batch) < 100:
+            break
+    else:
+        raise ValueError("Workflow-job pagination did not terminate")
+    if not failed:
+        raise ValueError("No completed failed job; do not request a repair without failure evidence")
+    parts = []
+    for job in failed:
+        if not isinstance(job.get("id"), int) or job["id"] <= 0:
+            raise ValueError("Invalid failed job identity")
+        steps = [s["name"] for s in job.get("steps", []) if s.get("conclusion") == "failure"]
+        result = subprocess.run(["gh", "api", f"repos/{repo}/actions/jobs/{job['id']}/logs"],
+                                text=True, capture_output=True, timeout=60)
+        if result.returncode:
+            raise ValueError(f"Cannot obtain completed failed job {job['id']}: {result.stderr.strip()}")
+        parts.append(f"Workflow {run_id}; job {job['id']}: {job.get('name')}; "
+                     f"conclusion {job['conclusion']}; failed steps {json.dumps(steps)}\n"
+                     + result.stdout[-20000:])
+    return "\n\n".join(parts)[-24000:]
+
+
 def request_repair(path):
     repo, config = configuration()
     selected = selected_source() if os.environ.get("SELECTED_JSON") else select_release()
-    result = subprocess.run(["gh", "run", "view", os.environ["GITHUB_RUN_ID"], "--repo", repo, "--log-failed"],
-                            text=True, capture_output=True)
-    evidence = result.stdout[-24000:] or result.stderr[-24000:] or "Workflow failure; consult this run's failed job."
     if os.environ.get("NONBLOCKING_FOLLOWUP") == "true":
         pr = os.environ.get("REVIEW_PR")
         evidence = "P2/P3 follow-up; existing publication remains valid.\n" + json.dumps(
             minor_findings(int(pr), config) if pr else [], indent=2)[-20000:]
+    else:
+        evidence = failed_job_evidence(repo, os.environ["GITHUB_RUN_ID"])
     published = [r for r in pages(f"repos/{repo}/releases") if not r["draft"] and not r["prerelease"]]
     last_publication = max((r["id"] for r in published), default=0)
     cycle = hashlib.sha256(f"{selected['upstream_sha']}:{last_publication}".encode()).hexdigest()
@@ -722,13 +768,19 @@ def request_repair(path):
     states = [state for pull in pulls if (state := repair_state(pull))
               and state["cycle"] == cycle]
     requests = []
+    boundaries = []
     for state in states:
-        requests.extend(c for c in pages(f"repos/{repo}/issues/{state['number']}/comments")
+        comments = pages(f"repos/{repo}/issues/{state['number']}/comments")
+        if state["config"] == config and (boundary := coding_boundary(comments)):
+            boundaries.append(boundary)
+        requests.extend(c for c in comments
                         if c.get("user", {}).get("login") == "warelik"
                         and c.get("user", {}).get("type") == "User"
                         and FIX_REQUEST.search(c.get("body") or ""))
     try:
         owner_identity()
+        if boundaries:
+            raise ValueError(boundaries[0])
         if len(requests) >= MAX_ATTEMPTS:
             raise ValueError("Three native coding attempts exhausted for this upstream release")
         if requests:

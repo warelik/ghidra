@@ -235,6 +235,43 @@ class ReviewTests(unittest.TestCase):
 
 
 class RepairAndRuntimeTests(unittest.TestCase):
+    def test_job_evidence_reads_completed_failed_jobs_not_running_workflow_logs(self):
+        response = {"jobs": [
+            {"id": 1, "name": "still running repair", "status": "in_progress", "conclusion": None},
+            {"id": 2, "name": "build", "status": "completed", "conclusion": "failure",
+             "steps": [{"name": "real smoke", "conclusion": "failure"}]}]}
+        result = type("Result", (), {"returncode": 0, "stdout": "TypeError: concrete failure", "stderr": ""})()
+        with patch.object(release, "api", return_value=response) as api, \
+                patch.object(release.subprocess, "run", return_value=result) as run:
+            evidence = release.failed_job_evidence(release.REPOSITORY, "39034727367")
+            self.assertIn("TypeError: concrete failure", evidence)
+            self.assertIn("real smoke", evidence)
+            api.assert_called_once_with(
+                f"repos/{release.REPOSITORY}/actions/runs/39034727367/jobs?filter=latest&per_page=100&page=1")
+            self.assertEqual(run.call_args.args[0],
+                             ["gh", "api", f"repos/{release.REPOSITORY}/actions/jobs/2/logs"])
+
+    def test_missing_failed_job_or_log_is_not_replaced_by_generic_repair_evidence(self):
+        with patch.object(release, "api", return_value={"jobs": []}), self.assertRaises(ValueError):
+            release.failed_job_evidence(release.REPOSITORY, "7")
+        response = {"jobs": [{"id": 2, "status": "completed", "conclusion": "failure"}]}
+        failed = type("Result", (), {"returncode": 1, "stdout": "", "stderr": "HTTP 403"})()
+        with patch.object(release, "api", return_value=response), \
+                patch.object(release.subprocess, "run", return_value=failed), self.assertRaises(ValueError):
+            release.failed_job_evidence(release.REPOSITORY, "7")
+
+    def test_coding_environment_boundary_requires_authenticated_bot_evidence(self):
+        body = "To use Codex here, [create an environment for this repo](https://example.invalid)."
+        self.assertIsNotNone(release.coding_boundary([{"user": BOT, "body": body}]))
+        self.assertIsNone(release.coding_boundary([{"user": {"login": "someone", "type": "User"}, "body": body}]))
+        self.assertIsNone(release.coding_boundary([{"user": BOT, "body": "Task started"}]))
+        older_error = {"user": BOT, "body": body, "created_at": WHEN}
+        new_request = {"user": {"login": "warelik", "type": "User"},
+                       "body": f"<!-- ghidra-fix:{SHA}:2 -->", "created_at": "2026-01-01T00:00:01Z"}
+        self.assertIsNone(release.coding_boundary([older_error, new_request]))
+        self.assertIsNotNone(release.coding_boundary([
+            new_request, {**older_error, "created_at": "2026-01-01T00:00:02Z"}]))
+
     def test_repair_never_changes_application_or_removes_tests(self):
         release.allowed_repair_paths({"scripts/release.py": "100644", "scripts/test_new.py": "100644"})
         for changes in ({}, {"Ghidra/application.properties": "100644"},
@@ -278,6 +315,7 @@ class RepairAndRuntimeTests(unittest.TestCase):
             self.assertIn(operation, smoke)
         self.assertGreaterEqual(smoke.count("pyghidra.open_project("), 2)
         self.assertIn("assert persisted is not None", smoke)
+        self.assertIn('.source(str(work / "fixture"))', smoke)
 
 
 if __name__ == "__main__":

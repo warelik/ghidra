@@ -10,7 +10,7 @@ from ghidra.program.model.symbol import SourceType
 
 with pyghidra.open_project(work, "Smoke", create=True) as project:
     if not project.getProjectData().getFile("/fixture"):
-        loader = pyghidra.program_loader().project(project).source(work / "fixture")
+        loader = pyghidra.program_loader().project(project).source(str(work / "fixture"))
         with loader.load() as results:
             results.save(pyghidra.task_monitor())
         with pyghidra.program_context(project, "/fixture") as program:
