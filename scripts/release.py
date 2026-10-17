@@ -24,6 +24,7 @@ BASELINE = "41d2bb84cf1e63841abeb5721034b3977032c8a5"
 EMPTY_PATCHSET = hashlib.sha256(b"").hexdigest()
 SHA = re.compile(r"[0-9a-f]{40}")
 DIGEST = re.compile(r"[0-9a-f]{64}")
+PUBLIC_TAG = re.compile(r"build-(\d+\.\d+(?:\.\d+)?)-[0-9a-f]{12}-[0-9a-f]{12}")
 BOT = "chatgpt-codex-connector[bot]"
 APP = "chatgpt-codex-connector"
 SEVERITY = re.compile(r"\bP[01]\b|\b(?:critical|high)\s+severity\b", re.I)
@@ -35,7 +36,7 @@ REPAIR_STATE = re.compile(r"<!-- ghidra-repair:v1 (\{[^\n]+\}) -->")
 FIX_REQUEST = re.compile(r"<!-- ghidra-fix:([0-9a-f]{40}):([1-9][0-9]*) -->")
 WAITING = "Pending authenticated exact-SHA Codex review; nothing verified or published"
 DEADLINE_SECONDS = 7200
-RUNNER_BUDGET_SECONDS = 7200
+RUNNER_BUDGET_SECONDS = 8000
 TERMINAL_ESCAPE_REFUSAL = (
     "the response contains terminal escape sequences; "
     "pass --allow-escape-sequences to output it anyway"
@@ -347,16 +348,37 @@ def parse_github_time(value, field):
     return parsed.astimezone(timezone.utc)
 
 
+def verified_publication_time(releases):
+    """Only a release passing the official-source and asset contract resets repair accounting."""
+    times = []
+    for record in releases:
+        if not isinstance(record, dict) or record.get("draft") or record.get("prerelease"):
+            continue
+        tag, config = record.get("tag_name"), record.get("target_commitish")
+        match = PUBLIC_TAG.fullmatch(tag) if isinstance(tag, str) else None
+        if not match or not isinstance(config, str) or not SHA.fullmatch(config):
+            continue
+        official = api(f"repos/{UPSTREAM}/releases/tags/Ghidra_{match[1]}_build", missing=True)
+        if official is None:
+            continue
+        try:
+            selected = select_release(official)
+            verify_remote_release(record, selected, config)
+        except (ValueError, KeyError, TypeError) as error:
+            if str(error).startswith("GitHub request failed:"):
+                raise
+            continue
+        times.append(parse_github_time(record.get("published_at"), "verified publication timestamp"))
+    return max(times, default=None)
+
+
 def enforce_runner_budget(now=None):
     explicit_now = now is not None
     now = now or datetime.now(timezone.utc)
     if now.tzinfo is None:
         raise ValueError("Runner-budget clock must include a timezone")
     now = now.astimezone(timezone.utc)
-    publications = [release for release in pages(f"repos/{REPOSITORY}/releases")
-                    if not release.get("draft") and not release.get("prerelease")]
-    published = max((parse_github_time(release.get("published_at"), "publication timestamp")
-                     for release in publications), default=None)
+    published = verified_publication_time(pages(f"repos/{REPOSITORY}/releases"))
     comments_path = f"repos/{REPOSITORY}/issues/comments"
     if published:
         comments_path += "?" + urlencode({"since": published.isoformat()})

@@ -30,9 +30,12 @@ Every six hours, on packaging changes and on authenticated Codex callbacks:
 
 Pending external review or repair is reported as unverified, not a successful
 release. P0/P1 findings block; P2/P3 findings receive automatic follow-up.
-The unpublished repair cycle is limited to 7,200 aggregate GitHub Actions runner
+The unpublished repair cycle is limited to 8,000 aggregate GitHub Actions runner
 seconds, measured from actual job timestamps across all attempts; exhaustion
 fails closed and reports the evidence in the existing issue.
+Only a published release that passes the exact official-source, provenance,
+asset and checksum verification resets that accounting window; unrelated or
+unverified GitHub releases do not.
 GitHub can report a cancelled job's completion one second before its start;
 that exact anomaly is charged as a full second. Other inverted timestamps fail
 closed. The real-time accounting clock is taken after the API walk so jobs

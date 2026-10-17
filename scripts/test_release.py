@@ -287,7 +287,31 @@ class ReviewTests(unittest.TestCase):
 
 
 class RepairAndRuntimeTests(unittest.TestCase):
-    def test_runner_budget_counts_all_attempts_jobs_and_clipped_running_time(self):
+    def test_only_verified_publication_resets_runner_cycle(self):
+        official = selected()
+        valid = {"tag_name": release.release_tag(official, BASE),
+                 "target_commitish": BASE, "published_at": "2026-01-01T00:00:00Z",
+                 "draft": False, "prerelease": False}
+        corrupt = {**valid, "tag_name": release.release_tag(official, OLD),
+                   "target_commitish": OLD, "published_at": "2026-01-02T00:00:00Z"}
+        unrelated = {**valid, "tag_name": "unrelated",
+                     "published_at": "2026-01-03T00:00:00Z"}
+        def verify(record, _selected, _config):
+            if record is corrupt:
+                raise ValueError("Published checksums mismatch")
+        with patch.object(release, "api", return_value={}), \
+                patch.object(release, "select_release", return_value=official), \
+                patch.object(release, "verify_remote_release", side_effect=verify) as checked:
+            boundary = release.verified_publication_time([corrupt, unrelated, valid])
+        self.assertEqual(boundary, release.datetime.fromisoformat("2026-01-01T00:00:00+00:00"))
+        self.assertEqual(checked.call_count, 2)
+        with patch.object(release, "api", side_effect=ValueError("GitHub request failed: HTTP 403")), \
+                self.assertRaisesRegex(ValueError, "HTTP 403"):
+            release.verified_publication_time([valid])
+
+    @patch.object(release, "verified_publication_time",
+                  return_value=release.datetime.fromisoformat("2026-01-01T00:00:00+00:00"))
+    def test_runner_budget_counts_all_attempts_jobs_and_clipped_running_time(self, _publication):
         publication = "2026-01-01T00:00:00Z"
         request = "2026-01-01T01:00:00Z"
         owner = {"login": "warelik", "type": "User"}
@@ -334,7 +358,9 @@ class RepairAndRuntimeTests(unittest.TestCase):
         self.assertIn(f"repos/{release.REPOSITORY}/actions/runs/10/attempts/1/jobs", endpoints)
         self.assertIn(f"repos/{release.REPOSITORY}/actions/runs/10/attempts/2/jobs", endpoints)
 
-    def test_runner_budget_fails_closed_for_denial_and_malformed_metrics(self):
+    @patch.object(release, "verified_publication_time",
+                  return_value=release.datetime.fromisoformat("2026-01-01T00:00:00+00:00"))
+    def test_runner_budget_fails_closed_for_denial_and_malformed_metrics(self, _publication):
         publication = {"draft": False, "prerelease": False,
                        "published_at": "2026-01-01T00:00:00Z"}
         request = {"user": {"login": "warelik", "type": "User"},
@@ -352,14 +378,16 @@ class RepairAndRuntimeTests(unittest.TestCase):
             release.enforce_runner_budget()
         exhausted = {"id": 1, "status": "completed", "conclusion": "success",
                      "started_at": "2026-01-01T01:00:00Z",
-                     "completed_at": "2026-01-01T03:00:00Z"}
+                     "completed_at": "2026-01-01T03:13:20Z"}
         now = release.datetime.fromisoformat("2026-01-01T04:00:00+00:00")
         with patch.object(release, "pages", side_effect=[
                 [publication], [request], [run], [exhausted]]), \
                 self.assertRaisesRegex(ValueError, "runner budget exhausted"):
             release.enforce_runner_budget(now)
 
-    def test_cancelled_one_second_timestamp_inversion_is_charged(self):
+    @patch.object(release, "verified_publication_time",
+                  return_value=release.datetime.fromisoformat("2026-01-01T00:00:00+00:00"))
+    def test_cancelled_one_second_timestamp_inversion_is_charged(self, _publication):
         publication = {"draft": False, "prerelease": False,
                        "published_at": "2026-01-01T00:00:00Z"}
         request = {"user": {"login": "warelik", "type": "User"},
@@ -386,7 +414,9 @@ class RepairAndRuntimeTests(unittest.TestCase):
                 [publication], [request], [run], [cancelled]]):
             self.assertEqual(release.enforce_runner_budget(scan_boundary), 1)
 
-    def test_runner_budget_accounts_for_jobs_started_during_api_walk(self):
+    @patch.object(release, "verified_publication_time",
+                  return_value=release.datetime.fromisoformat("2026-01-01T00:00:00+00:00"))
+    def test_runner_budget_accounts_for_jobs_started_during_api_walk(self, _publication):
         publication = {"draft": False, "prerelease": False,
                        "published_at": "2026-01-01T00:00:00Z"}
         request = {"user": {"login": "warelik", "type": "User"},
