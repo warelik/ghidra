@@ -26,6 +26,17 @@ class ProtocolError(RuntimeError):
     pass
 
 
+def _exception_identity(error):
+    # A candidate can define an unrelated class named ValueError/TypeError.
+    # Only the actual built-in classes may satisfy those test expectations.
+    identities = {ValueError: "ValueError", TypeError: "TypeError",
+                  RuntimeError: "RuntimeError", AttributeError: "AttributeError",
+                  subprocess.TimeoutExpired: "TimeoutExpired",
+                  subprocess.CalledProcessError: "CalledProcessError",
+                  SystemExit: "SystemExit", KeyboardInterrupt: "KeyboardInterrupt"}
+    return identities.get(type(error), "UnknownError")
+
+
 def _line_read(stream):
     line = stream.readline()
     if not line:
@@ -213,7 +224,7 @@ class Client:
                     args, kwargs = self.codec.decode(reply["args"])
                     result = {"id": reply["id"], "value": self.codec.encode(callback(*args, **kwargs))}
                 except BaseException as error:
-                    detail = {"$": "error", "type": type(error).__name__, "message": str(error)}
+                    detail = {"$": "error", "type": _exception_identity(error), "message": str(error)}
                     if isinstance(error, subprocess.TimeoutExpired):
                         detail.update(cmd=self.codec.encode(error.cmd), timeout=error.timeout)
                     result = {"id": reply.get("id"), "error": detail}
@@ -226,7 +237,7 @@ class Client:
             return self.codec.decode(reply.get("value"))
 
 
-BASELINE_COUNT = 48  # 39 release assertions plus nine supervisor regressions.
+BASELINE_COUNT = 50  # 39 release assertions plus eleven supervisor regressions.
 CASE_FUNCTIONS = frozenset({"inline_source", "release_tag"})
 MAX_CASE_BYTES = 65536
 MAX_CASES = 256
@@ -352,13 +363,10 @@ def evaluate_cases(candidate, directory):
 def worker(candidate):
     protocol = os.fdopen(os.dup(sys.stdout.fileno()), "w", buffering=1)
     sys.stdout = sys.stderr
-    sys.path.insert(0, candidate)
-    try:
-        module = importlib.import_module("release")
-    except BaseException as error:
-        _line_write(protocol, {"id": 0, "error": {"$": "error", "type": type(error).__name__,
-                                                     "message": str(error)}})
-        return 1
+    # Bind the transport before candidate import; importing release.py must not
+    # replace the adapter's class methods through __main__.
+    write, read, error_identity = _line_write, _line_read, _exception_identity
+    allowed_case_functions = CASE_FUNCTIONS
     codec = None
     callback_sequence = 1_000_000
 
@@ -378,7 +386,7 @@ def worker(candidate):
         if op == "exit": return target.__exit__(*arguments[1])
         if op == "invoke":
             name, positional = arguments[1], arguments[2]
-            if name not in CASE_FUNCTIONS or not isinstance(positional, list):
+            if name not in allowed_case_functions or not isinstance(positional, list):
                 raise ProtocolError("arbitrary invocation refused")
             return getattr(target, name)(*positional)
         raise ProtocolError("unknown operation")
@@ -387,19 +395,19 @@ def worker(candidate):
         nonlocal callback_sequence
         callback_sequence += 1
         callback_request = callback_sequence
-        _line_write(protocol, {"id": callback_request, "op": "callback", "callback": callback,
+        write(protocol, {"id": callback_request, "op": "callback", "callback": callback,
                                  "args": codec.encode((args, kwargs))})
         while True:
-            reply = _line_read(sys.stdin)
+            reply = read(sys.stdin)
             if "op" in reply:
                 try:
                     nested = {"id": reply["id"], "value": codec.encode(dispatch(reply))}
                 except BaseException as error:
-                    detail = {"$": "error", "type": type(error).__name__, "message": str(error)}
+                    detail = {"$": "error", "type": error_identity(error), "message": str(error)}
                     if isinstance(error, subprocess.TimeoutExpired):
                         detail.update(cmd=codec.encode(error.cmd), timeout=error.timeout)
                     nested = {"id": reply.get("id"), "error": detail}
-                _line_write(protocol, nested)
+                write(protocol, nested)
                 continue
             if reply.get("id") != callback_request:
                 raise ProtocolError("invalid callback response")
@@ -408,20 +416,29 @@ def worker(candidate):
             return codec.decode(reply.get("value"))
 
     codec = Codec(callback_send, allow_callbacks=False)
+    for name in ("encode", "decode", "_reference"):
+        setattr(codec, name, getattr(codec, name))
+    sys.path.insert(0, candidate)
+    try:
+        module = importlib.import_module("release")
+    except BaseException as error:
+        write(protocol, {"id": 0, "error": {"$": "error", "type": error_identity(error),
+                                                   "message": str(error)}})
+        return 1
     codec.objects[0] = module
     while True:
         try:
-            message = _line_read(sys.stdin)
+            message = read(sys.stdin)
             request_id = message["id"]
             result = dispatch(message)
             reply = {"id": request_id, "value": codec.encode(result)}
         except BaseException as error:
-            detail = {"$": "error", "type": type(error).__name__, "message": str(error)}
+            detail = {"$": "error", "type": error_identity(error), "message": str(error)}
             if isinstance(error, subprocess.TimeoutExpired):
                 detail.update(cmd=codec.encode(error.cmd), timeout=error.timeout)
             reply = {"id": message.get("id") if isinstance(message, dict) else None,
                      "error": detail}
-        _line_write(protocol, reply)
+        write(protocol, reply)
 
 
 class SupervisorRegressionTests(unittest.TestCase):
@@ -496,6 +513,26 @@ class SupervisorRegressionTests(unittest.TestCase):
         self.assertEqual(Codec().decode(Codec().encode(forged)), forged)
         source = "def release_tag(*args): return " + repr(forged) + "\n"
         case = {"id": "must-actually-raise", "call": "release_tag",
+                "args": [{}, "bad"], "raises": "ValueError"}
+        self.run_fixture(source, self.document(case), False)
+
+    def test_custom_class_named_value_error_cannot_forge_builtin(self):
+        source = ("class ValueError(Exception): pass\n"
+                  "def release_tag(*args): raise ValueError('forged')\n")
+        case = {"id": "builtin-only", "call": "release_tag",
+                "args": [{}, "bad"], "raises": "ValueError"}
+        self.run_fixture(source, self.document(case), False)
+
+    def test_candidate_import_cannot_replace_adapter_dictionary_encoder(self):
+        source = ("import __main__\n"
+                  "original = __main__.Codec.encode\n"
+                  "def forged(self, value):\n"
+                  " if isinstance(value, dict) and value.get('$') == 'error': return value\n"
+                  " return original(self, value)\n"
+                  "__main__.Codec.encode = forged\n"
+                  "def release_tag(*args):\n"
+                  " return {'$': 'error', 'type': 'ValueError', 'message': 'forged'}\n")
+        case = {"id": "adapter-patch", "call": "release_tag",
                 "args": [{}, "bad"], "raises": "ValueError"}
         self.run_fixture(source, self.document(case), False)
 
