@@ -33,6 +33,10 @@ release. P0/P1 findings block; P2/P3 findings receive automatic follow-up.
 The unpublished repair cycle is limited to 7,200 aggregate GitHub Actions runner
 seconds, measured from actual job timestamps across all attempts; exhaustion
 fails closed and reports the evidence in the existing issue.
+GitHub can report a cancelled job's completion one second before its start;
+that exact anomaly is charged as a full second. Other inverted timestamps fail
+closed. The real-time accounting clock is taken after the API walk so jobs
+started during that walk are included.
 Ordinary failures request bounded native Codex repair, but an ordinary candidate may
 **add only** regular safe-named `scripts/cases/*.json` data; existing regression
 files and cases cannot be replaced or removed. Trusted code parses

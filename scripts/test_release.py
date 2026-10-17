@@ -347,6 +347,48 @@ class RepairAndRuntimeTests(unittest.TestCase):
                 self.assertRaisesRegex(ValueError, "runner budget exhausted"):
             release.enforce_runner_budget(now)
 
+    def test_cancelled_one_second_timestamp_inversion_is_charged(self):
+        publication = {"draft": False, "prerelease": False,
+                       "published_at": "2026-01-01T00:00:00Z"}
+        request = {"user": {"login": "warelik", "type": "User"},
+                   "created_at": "2026-01-01T01:00:00Z",
+                   "body": f"<!-- ghidra-fix:{SHA}:1 -->"}
+        run = {"id": 10, "run_attempt": 1}
+        cancelled = {"id": 1, "status": "completed", "conclusion": "cancelled",
+                     "started_at": "2026-01-01T01:00:01Z",
+                     "completed_at": "2026-01-01T01:00:00Z"}
+        now = release.datetime.fromisoformat("2026-01-01T02:00:00+00:00")
+        with patch.object(release, "pages", side_effect=[
+                [publication], [request], [run], [cancelled]]):
+            self.assertEqual(release.enforce_runner_budget(now), 1)
+        for job in ({**cancelled, "conclusion": "success"},
+                    {**cancelled, "completed_at": "2026-01-01T00:59:59Z"}):
+            with self.subTest(job=job), patch.object(release, "pages", side_effect=[
+                    [publication], [request], [run], [job]]), \
+                    self.assertRaisesRegex(ValueError, "Malformed GitHub Actions job timestamps"):
+                release.enforce_runner_budget(now)
+
+    def test_runner_budget_accounts_for_jobs_started_during_api_walk(self):
+        publication = {"draft": False, "prerelease": False,
+                       "published_at": "2026-01-01T00:00:00Z"}
+        request = {"user": {"login": "warelik", "type": "User"},
+                   "created_at": "2026-01-01T01:00:00Z",
+                   "body": f"<!-- ghidra-fix:{SHA}:1 -->"}
+        run = {"id": 10, "run_attempt": 1}
+        job = {"id": 1, "status": "completed", "conclusion": "success",
+               "started_at": "2026-01-01T02:00:30Z",
+               "completed_at": "2026-01-01T02:00:45Z"}
+        class SequenceClock(release.datetime):
+            instants = [release.datetime.fromisoformat("2026-01-01T02:00:00+00:00"),
+                        release.datetime.fromisoformat("2026-01-01T02:01:00+00:00")]
+            @classmethod
+            def now(cls, _timezone):
+                return cls.instants.pop(0)
+        with patch.object(release, "datetime", SequenceClock), \
+                patch.object(release, "pages", side_effect=[
+                    [publication], [request], [run], [job]]):
+            self.assertEqual(release.enforce_runner_budget(), 15)
+
     def test_provider_lists_are_paginated_until_a_short_page(self):
         full = [{"id": item} for item in range(100)]
         with patch.object(release, "api", side_effect=[full, [{"id": 100}]]) as api:

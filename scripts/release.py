@@ -1,7 +1,7 @@
 import argparse
 import base64
 import binascii
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import io
 import json
@@ -344,6 +344,7 @@ def parse_github_time(value, field):
 
 
 def enforce_runner_budget(now=None):
+    explicit_now = now is not None
     now = now or datetime.now(timezone.utc)
     if now.tzinfo is None:
         raise ValueError("Runner-budget clock must include a timezone")
@@ -381,6 +382,10 @@ def enforce_runner_budget(now=None):
                 if job_id not in seen:
                     seen.add(job_id)
                     jobs.append(job)
+    # The API walk can take over a minute while another job starts.  Use the
+    # end of that walk as the real-time accounting boundary.
+    if not explicit_now:
+        now = datetime.now(timezone.utc)
     consumed = 0
     for job in jobs:
         if job.get("conclusion") == "skipped" or (job.get("status") == "queued" and not job.get("started_at")):
@@ -392,9 +397,17 @@ def enforce_runner_budget(now=None):
             completed = now
         else:
             raise ValueError("Missing or malformed GitHub Actions job status")
-        begin, end = max(job_started, started), min(completed, now)
-        if completed < job_started or job_started > now:
+        if completed < job_started:
+            # GitHub can report a cancelled job as starting one second after
+            # completion. Charge a full second rather than dropping it.
+            if (job.get("conclusion") == "cancelled" and
+                    (job_started - completed).total_seconds() <= 1):
+                completed = job_started + timedelta(seconds=1)
+            else:
+                raise ValueError("Malformed GitHub Actions job timestamps")
+        if job_started > now:
             raise ValueError("Malformed GitHub Actions job timestamps")
+        begin, end = max(job_started, started), min(completed, now)
         if end > begin:
             consumed += (end - begin).total_seconds()
     if consumed >= RUNNER_BUDGET_SECONDS:
