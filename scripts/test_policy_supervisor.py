@@ -92,7 +92,9 @@ class Codec:
         if isinstance(value, list):
             return [self.encode(item) for item in value]
         if isinstance(value, dict) and all(isinstance(key, str) for key in value):
-            return {key: self.encode(item) for key, item in value.items()}
+            encoded = {key: self.encode(item) for key, item in value.items()}
+            # A plain result may contain the protocol discriminator as data.
+            return {"$": "dict", "items": encoded} if "$" in value else encoded
         if callable(value) and self.send is not None and self.allow_callbacks:
             return self._reference(value, "callback")
         return self._reference(value)
@@ -107,6 +109,10 @@ class Codec:
         kind = value.get("$")
         if kind is None:
             return {key: self.decode(item) for key, item in value.items()}
+        if kind == "dict":
+            if set(value) != {"$", "items"} or not isinstance(value["items"], dict):
+                raise ProtocolError("malformed tagged dictionary")
+            return {key: self.decode(item) for key, item in value["items"].items()}
         if kind == "bytes":
             return base64.b64decode(value["data"], validate=True)
         if kind == "path":
@@ -220,7 +226,7 @@ class Client:
             return self.codec.decode(reply.get("value"))
 
 
-BASELINE_COUNT = 47  # 39 release assertions plus eight supervisor regressions.
+BASELINE_COUNT = 48  # 39 release assertions plus nine supervisor regressions.
 CASE_FUNCTIONS = frozenset({"inline_source", "release_tag"})
 MAX_CASE_BYTES = 65536
 MAX_CASES = 256
@@ -484,6 +490,14 @@ class SupervisorRegressionTests(unittest.TestCase):
         case = {"id": "patched", "call": "inline_source", "args": [{"commit_id": "ok"}],
                 "expect": "ok"}
         self.run_fixture(source, self.document(case), True)
+
+    def test_candidate_returned_dictionary_cannot_forge_an_exception(self):
+        forged = {"$": "error", "type": "ValueError", "message": "forged"}
+        self.assertEqual(Codec().decode(Codec().encode(forged)), forged)
+        source = "def release_tag(*args): return " + repr(forged) + "\n"
+        case = {"id": "must-actually-raise", "call": "release_tag",
+                "args": [{}, "bad"], "raises": "ValueError"}
+        self.run_fixture(source, self.document(case), False)
 
     def test_malformed_and_empty_documents_are_rejected(self):
         self.run_fixture("", b"{", False)
