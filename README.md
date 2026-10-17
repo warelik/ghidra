@@ -30,17 +30,38 @@ Every six hours, on packaging changes and on authenticated Codex callbacks:
 
 Pending external review or repair is reported as unverified, not a successful
 release. P0/P1 findings block; P2/P3 findings receive automatic follow-up.
-Ordinary failures request bounded native Codex repair. Proposed repair code runs
-without write credentials and against trusted tests before selective adoption.
-The official application remains unmodified.
+Ordinary failures request bounded native Codex repair, but an ordinary candidate may
+change **only** regular safe-named `scripts/cases/*.json` data. Trusted code parses
+those files as bounded JSON literals and invokes a fixed function allowlist; no
+candidate Python, workflow, test runner, documentation, Dockerfile or `.repair`
+content is executed or adopted. The credential-free policy container retains no
+network, capabilities or privilege escalation and has CPU, memory and process bounds.
 
-The declarative-case supervisor is trusted configuration, not an ordinary repair.
-Its bootstrap must be adopted from draft PR #14 only after exact-head review, rootless
-two-container integration and the full unit suite. The adopted configuration then
-requires a fresh review and full build before publication. The existing generic
-repair land command cannot adopt that transition. Afterward, ordinary repair
-branches may change only the packaging files listed in `AGENTS.md` and versioned
-`scripts/cases/*.json`; trusted Python tests and the supervisor remain immutable.
+If a data-only attempt cannot repair the failure, the existing workflow uses the
+owner-authorized Codex request mechanism to create a separate trusted-configuration
+PR from the current `downstream` commit. Codex pushes the implementation there. The
+workflow requires owner-authored native review of its exact SHA, then runs the
+reviewed candidate's normal unittest suite and declarative evaluator without write
+credentials. Source review is the authority for that trusted program—tests cannot
+prove actively malicious source honest. Only allowlisted configuration blobs are
+adopted, never `.repair` evidence or candidate history; adoption triggers a fresh
+default-branch review and full build before publication.
+
+Draft PR #14 is the one-time bootstrap because the old default cannot recognize this
+trusted-update mode. Verify its exact head, run the full unit suite and rootless
+read-only policy container, obtain a clean owner-authored native exact-SHA review,
+then fast-forward `downstream` to that exact commit. Do not use the old generic
+`land` command for this bootstrap. Dispatch the release workflow afterward; it must
+perform a fresh default review and complete build before any publication. Future
+trusted updates follow the automated separate-PR cycle above and need no manual owner
+maintenance. The official application remains unmodified.
+
+The reviewed bootstrap operation is a non-forced ref update, after replacing
+`REVIEWED_SHA` with the full PR head verified by both `git ls-remote` and the native
+review: `gh api --method PATCH repos/warelik/ghidra/git/refs/heads/downstream
+--input - <<<\'{"sha":"REVIEWED_SHA","force":false}\'`. Immediately read the ref
+back and dispatch `release.yml` on `downstream`. Do not run this operation before the
+review and rootless container check, and do not merge or mark draft PR #14 ready.
 
 Releases have the tag `build-VERSION-UPSTREAM_SHA12-CONFIG_SHA12` and exactly:
 

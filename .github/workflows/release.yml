@@ -106,7 +106,9 @@ jobs:
   policy-check:
     name: Check Repair Against Trusted Tests Without Write Credentials
     needs: prepare
-    if: needs.prepare.outputs.ready == 'true' && needs.prepare.outputs.mode == 'repair'
+    if: >-
+      needs.prepare.outputs.ready == 'true' &&
+      (needs.prepare.outputs.mode == 'repair' || needs.prepare.outputs.mode == 'trusted')
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -121,6 +123,8 @@ jobs:
           path: candidate
           persist-credentials: false
       - name: Run Trusted And Proposed Tests In Read-Only Containers
+        env:
+          TRUSTED_UPDATE: ${{ needs.prepare.outputs.mode == 'trusted' }}
         run: python3 trusted/scripts/release.py check-policy "$GITHUB_WORKSPACE/candidate"
 
   build:
@@ -176,7 +180,7 @@ jobs:
     needs: [prepare, policy-check]
     if: >-
       needs.prepare.outputs.ready == 'true' &&
-      needs.prepare.outputs.mode == 'repair'
+      (needs.prepare.outputs.mode == 'repair' || needs.prepare.outputs.mode == 'trusted')
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
