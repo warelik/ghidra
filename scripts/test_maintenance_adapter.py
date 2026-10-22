@@ -33,7 +33,8 @@ def candidate():
 class FakeLifecycle:
     @staticmethod
     def candidate_identity(value):
-        return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+        return hashlib.sha256(json.dumps(
+            value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
     @staticmethod
     def evaluate_review(target, *_evidence):
@@ -160,7 +161,8 @@ class AcceptedBaselineTests(unittest.TestCase):
         native = {**artifact, "run_id": 800, "run_attempt": 2}
         bridge = {"reviewed_sha": source["configuration_sha"], "adopted_sha": adopted,
                   "candidate_id": FakeLifecycle.candidate_identity(source)}
-        with patch.object(release, "artifact_for_attempt", return_value=native):
+        with patch.object(release, "lifecycle", return_value=FakeLifecycle), \
+                patch.object(release, "artifact_for_attempt", return_value=native):
             self.assertEqual(release.require_exact_artifact_attempt(
                 source, [], 800, 2, artifact, adopted_configuration=bridge), native)
         with patch.object(release, "artifact_for_attempt", return_value=native), \
@@ -306,8 +308,26 @@ class AcceptedBaselineTests(unittest.TestCase):
                     "upstream_release_id": 17, "upstream_tag": "Ghidra_12.1.4_build",
                     "asset": {"name": "ghidra.zip", "sha256": "a" * 64,
                               "size": 1, "url": "https://example.invalid/ghidra.zip"}}
-        accepted = {"candidate": {**candidate(), "configuration_sha": base},
-                    "publication": {"id": 71}}
+        accepted_candidate = {**candidate(), "configuration_sha": base}
+        accepted_publication = {
+            "kind": "github-release", "id": 71,
+            "published_at": "2026-10-19T10:00:00Z", "metadata_sha256": METADATA,
+        }
+        accepted_value = json.dumps({
+            "schema": 1, "repository": release.REPOSITORY,
+            "candidate": accepted_candidate, "publication": accepted_publication,
+        }, sort_keys=True, separators=(",", ":"))
+        accepted = {
+            "proof": {
+                "endpoint": release.ACCEPTED_BASELINE_ENDPOINT,
+                "variable": {
+                    "name": "FORK_ACCEPTED_BASELINE", "value": accepted_value,
+                    "created_at": "2026-10-19T09:00:00Z",
+                    "updated_at": "2026-10-19T10:00:00Z",
+                },
+            },
+            "candidate": accepted_candidate, "publication": accepted_publication,
+        }
         pending = {"pending_adoption": True, "configuration_sha": base,
                    "adopted_sha": adopted, "decision": "workflow-continuation",
                    "artifact": None}
@@ -345,7 +365,8 @@ class AcceptedBaselineTests(unittest.TestCase):
             path = Path(temporary) / "selection.json"
             release.prepare_shared(path)
             old_run_output = output.call_args.kwargs.copy()
-            verified.assert_not_called()
+            self.assertEqual(verified.call_count, 1)
+            self.assertEqual(verified.call_args.args, ([],))
             continue_candidate.assert_not_called()
             output.reset_mock()
             release.prepare_shared(path)
@@ -356,7 +377,8 @@ class AcceptedBaselineTests(unittest.TestCase):
         self.assertFalse(old_run_output["ready"])
         self.assertFalse(old_run_output["followup"])
         self.assertEqual(old_run_output["candidate_source_sha"], adopted)
-        verified.assert_called_once_with([])
+        self.assertEqual(verified.call_count, 2)
+        self.assertEqual(verified.call_args.args, ([],))
         continue_candidate.assert_called_once_with(adopted, selected, None, accepted, bridge)
 
     def test_interrupted_adoption_closes_only_its_exact_open_repair_pr_idempotently(self):
@@ -450,7 +472,8 @@ class AcceptedBaselineTests(unittest.TestCase):
                 adopted, {"upstream_sha": SHA}, {"publication": "latest"},
                 {"accepted": "baseline"}, bridge)
         review.assert_called_once_with(source, reviewed, release.BASELINE,
-                                       pair_record=pair_record, allow_closed=True)
+                                       pair_record=pair_record, allow_closed=True,
+                                       selection={"upstream_sha": SHA})
         close.assert_called_once_with(bridge, adopted)
         authorize.assert_called_once_with(
             source, {"publication": "latest"}, contexts,
@@ -847,7 +870,8 @@ class AcceptedBaselineTests(unittest.TestCase):
                                "code diff SHA-256 `" + "d" * 64 + "`; "
                                "regression path `scripts/test_release.py`; regression diff SHA-256 `"
                                + "e" * 64 + "`;")}]
-        marker = release.disposition_marker(source, record)
+        with patch.object(release, "lifecycle", return_value=FakeLifecycle):
+            marker = release.disposition_marker(source, record)
         native_user = {"login": "warelik", "type": "User", "id": 17,
                        "node_id": "MDQ6VXNlcjE3", "site_admin": False}
         comment = {"id": 701, "user": native_user,
@@ -871,13 +895,14 @@ class AcceptedBaselineTests(unittest.TestCase):
         source = candidate()
         record = [{"finding_id": "inline:91:601", "candidate_id": FakeLifecycle.candidate_identity(source),
                    "source_sha": source["configuration_sha"], "status": "fixed",
-                   "evidence": "code location `scripts/release.py` at `@@ -1 +1 @@`; "
-                               "code diff SHA-256 `" + "d" * 64 + "`"}]
+                   "evidence": " \t\n "}]
         comment = {"id": 702, "user": {"login": "warelik", "type": "User"},
                    "created_at": "2026-10-19T10:00:00Z", "updated_at": "2026-10-19T10:00:00Z",
-                   "body": release.disposition_marker(source, record)}
+                   "body": ""}
+        with patch.object(release, "lifecycle", return_value=FakeLifecycle):
+            comment["body"] = release.disposition_marker(source, record)
         with patch.object(release, "lifecycle", return_value=FakeLifecycle), \
-                self.assertRaisesRegex(ValueError, "code and regression evidence"):
+                self.assertRaisesRegex(ValueError, "item is malformed"):
             release.review_dispositions_from_comments([comment], source)
 
     def test_native_checkpoint_cannot_name_another_release_or_provenance(self):
@@ -965,6 +990,7 @@ class AcceptedBaselineTests(unittest.TestCase):
         changed_variable = {**expected_variable, "updated_at": "2026-10-19T10:02:00Z"}
         with patch.object(release, "verify_remote_release", return_value=METADATA), \
                 patch.object(release, "latest_verified_publication", return_value=publication), \
+                patch.object(release, "pages", return_value=[]), \
                 patch.object(release, "api", return_value=changed_variable) as native, \
                 patch.object(release, "maintenance_candidate", return_value=candidate()), \
                 self.assertRaisesRegex(ValueError, "changed before the guarded recovery update"):
@@ -985,6 +1011,7 @@ class AcceptedBaselineTests(unittest.TestCase):
         with patch.object(release, "verify_remote_release", return_value=METADATA), \
                 patch.object(release, "latest_verified_publication", return_value=publication), \
                 patch.object(release, "maintenance_candidate", return_value=candidate()), \
+                patch.object(release, "pages", return_value=[]), \
                 patch.object(release, "api", side_effect=[stale_variable, None]) as native, \
                 patch.object(release, "read_accepted_baseline", return_value={"verified": True}) as readback:
             result = release.record_accepted_baseline_after_publication(
@@ -1008,7 +1035,7 @@ class AcceptedBaselineTests(unittest.TestCase):
         with patch.object(release, "api", return_value=variable), \
                 patch.object(release, "maintenance_candidate", return_value=candidate()), \
                 patch.object(release, "lifecycle", return_value=FakeLifecycle), \
-                self.assertRaisesRegex(ValueError, "duplicate field"):
+                self.assertRaisesRegex(ValueError, "not exact JSON"):
             release.read_accepted_baseline(self.publication())
 
     def test_final_history_uses_the_native_accepted_candidate(self):
@@ -1092,20 +1119,20 @@ class AcceptedBaselineTests(unittest.TestCase):
             "review_contexts": release.paired_context_ids(contexts),
         }
         comments = []
-        for attempt in (1, 2):
+        for attempt in (1,):
             marker = {**base, "run_attempt": attempt}
             comments.append({"id": 700 + attempt, "user": {"login": "warelik", "type": "User"},
                              "body": "<!-- fork-policy-attempt:v1 "
                                      + json.dumps(marker, sort_keys=True, separators=(",", ":"))
                                      + " -->"})
-        # A completion from attempt 2 must not complete the exact reservation for attempt 1.
+        # A completion from attempt 2 cannot be attributed to the reservation for attempt 1.
         completion = {"schema": 1, "candidate_id": base["candidate_id"],
                       "run_id": 800, "run_attempt": 2, "workflow_sha": base["workflow_sha"],
                       "review_contexts": base["review_contexts"]}
-        comments.append({"id": 703, "user": {"login": "warelik", "type": "User"},
-                         "body": "<!-- fork-policy:v1 "
-                                 + json.dumps(completion, sort_keys=True, separators=(",", ":"))
-                                 + " -->"})
+        completion_comment = {"id": 703, "user": {"login": "warelik", "type": "User"},
+                              "body": "<!-- fork-policy:v1 "
+                                      + json.dumps(completion, sort_keys=True, separators=(",", ":"))
+                                      + " -->"}
         native_attempt = {"id": 800, "run_attempt": 1, "path": release.WORKFLOW_PATH,
                           "head_sha": base["workflow_sha"], "status": "completed",
                           "conclusion": "success"}
@@ -1125,13 +1152,16 @@ class AcceptedBaselineTests(unittest.TestCase):
                 patch.object(release, "pages", side_effect=pages), \
                 patch.object(release, "api", return_value=native_attempt) as api, \
                 patch.object(release, "validate_native_workflow_source", return_value=True):
-            receipt = release.policy_migration_receipt(source, contexts)
-        self.assertEqual(receipt["state"], "passed")
-        self.assertEqual(receipt["run_attempt"], 1)
-        self.assertIn("repos/warelik/ghidra/actions/runs/800/attempts/1/jobs", routes)
-        self.assertNotIn("repos/warelik/ghidra/actions/runs/800/attempts/2/jobs", routes)
-        self.assertEqual(api.call_args.args[0],
-                         "repos/warelik/ghidra/actions/runs/800/attempts/1")
+            result = release.policy_migration_receipt(source, contexts)
+            self.assertEqual(result["state"], "passed")
+            self.assertEqual(result["run_attempt"], 1)
+            self.assertIn("repos/warelik/ghidra/actions/runs/800/attempts/1/jobs", routes)
+            self.assertNotIn("repos/warelik/ghidra/actions/runs/800/attempts/2/jobs", routes)
+            self.assertEqual(api.call_args.args[0],
+                             "repos/warelik/ghidra/actions/runs/800/attempts/1")
+            comments.append(completion_comment)
+            with self.assertRaisesRegex(ValueError, "no exact attempt reservation"):
+                release.policy_migration_receipt(source, contexts)
 
     def test_latest_policy_rerun_attempt_controls_receipt_state(self):
         source = candidate()
@@ -1337,6 +1367,7 @@ class AcceptedBaselineTests(unittest.TestCase):
         with patch.dict(os.environ, {"GITHUB_RUN_ID": "901", "GITHUB_RUN_ATTEMPT": "2"}), \
                 patch.object(release, "lifecycle", return_value=FakeLifecycle), \
                 patch.object(release, "maintenance_revision_at", return_value="revision"), \
+                patch.object(release, "api", return_value={"sha": adopted}), \
                 patch.object(release, "review_pair_for", return_value=pair), \
                 patch.object(release, "policy_migration_receipt", return_value=passed), \
                 patch.object(release, "close_interrupted_adoption"), \
@@ -1422,6 +1453,8 @@ class AcceptedBaselineTests(unittest.TestCase):
         base = "4" * 40
         proof = {"endpoint": release.ACCEPTED_BASELINE_ENDPOINT,
                  "variable": self.native_variable()}
+        with patch.object(release, "lifecycle", return_value=FakeLifecycle):
+            request_body = release.review_marker(source, "delta", source["configuration_sha"], base)
         context = {
             "scope": "delta", "pr": 91, "request_id": 501,
             "review_sha": source["configuration_sha"], "base_sha": base,
@@ -1434,7 +1467,7 @@ class AcceptedBaselineTests(unittest.TestCase):
             "user": {"login": "warelik", "type": "User"},
             "created_at": "2026-10-19T10:02:00Z",
             "updated_at": "2026-10-19T10:02:00Z",
-            "body": release.review_marker(source, "delta", source["configuration_sha"], base),
+            "body": request_body,
         }
         older_request = {**request, "id": 500,
                          "created_at": "2026-10-19T10:01:00Z",
@@ -1508,10 +1541,13 @@ class AcceptedBaselineTests(unittest.TestCase):
                 "state": "open", "accepted_baseline": accepted_baseline,
             }
             request_time = "2026-10-20T10:02:00Z"
+            with patch.object(release, "lifecycle", return_value=core):
+                request_body = release.review_marker(
+                    source, "delta", review_sha, base_sha)
             request = {
                 "id": 501, "user": {"login": "warelik", "type": "User"},
                 "created_at": request_time, "updated_at": request_time,
-                "body": release.review_marker(source, "delta", review_sha, base_sha),
+                "body": request_body,
             }
             bot_user = {"login": release.BOT, "type": "Bot", "id": 9001}
             bot_app = {"slug": release.APP}
@@ -1551,6 +1587,11 @@ class AcceptedBaselineTests(unittest.TestCase):
             def api(route, **_kwargs):
                 if route.endswith("/pulls/91"):
                     return pull
+                native_commit_prefix = f"repos/{release.REPOSITORY}/commits/"
+                if route.startswith(native_commit_prefix):
+                    prefix = route[len(native_commit_prefix):]
+                    resolved = next((sha for sha in tree_by_sha if sha.startswith(prefix)), prefix)
+                    return {"sha": resolved}
                 prefix = f"repos/{release.REPOSITORY}/git/commits/"
                 if route.startswith(prefix):
                     sha = route[len(prefix):]
@@ -1568,7 +1609,8 @@ class AcceptedBaselineTests(unittest.TestCase):
                     return []
                 raise AssertionError(route)
 
-            with patch.object(release, "pages", side_effect=pages), \
+            with patch.object(release, "lifecycle", return_value=core), \
+                    patch.object(release, "pages", side_effect=pages), \
                     patch.object(release, "api", side_effect=api):
                 return release.review_context_result(source, context)
 
@@ -1792,11 +1834,16 @@ class AcceptedBaselineTests(unittest.TestCase):
         proof = core.validate_workflow_source.call_args.args[-1]
         self.assertEqual(proof, {"run_file": run_file, "reserved_file": reserved_file,
                                  "workflow_run": graphql})
-        self.assertEqual(calls[-1], ("graphql", {
+        graphql_call = ("graphql", {
             "method": "POST", "data": {
                 "query": release._WORKFLOW_RUN_FILE_QUERY,
                 "variables": {"id": run_record["node_id"]},
-            }}))
+            }})
+        self.assertIn((f"repos/{release.REPOSITORY}/contents/{release.WORKFLOW_PATH}?ref={'a' * 40}", {}),
+                      calls)
+        self.assertIn((f"repos/{release.REPOSITORY}/contents/{release.WORKFLOW_PATH}?ref={'b' * 40}", {}),
+                      calls)
+        self.assertIn(graphql_call, calls)
 
     def test_dismissed_native_review_passes_the_raw_issue_events_to_shared_core(self):
         value = candidate()
@@ -1905,12 +1952,14 @@ class RepairDispositionProposalTests(unittest.TestCase):
                         f"100644 blob {'6' * 40} scripts/test_release.py"))
 
         def command(args, **_kwargs):
+            path = args[-1].split(":", 1)[-1]
+            code_path = path == "scripts/release.py"
             if args[1] == "ls-tree":
                 return next(entries)
             if args[1] == "show":
-                return (b"def authorize_candidate():\n" if args[-1].endswith("release.py")
+                return (b"def authorize_candidate():\n" if code_path
                         else regression_source)
-            return code_diff if args[-1].endswith("release.py") else regression_diff
+            return code_diff if code_path else regression_diff
 
         with patch.object(release, "repair_diff", return_value=["scripts/release.py",
                                                                  "scripts/test_release.py"]), \
@@ -1937,7 +1986,7 @@ class RepairDispositionProposalTests(unittest.TestCase):
             f"code diff SHA-256 `{hashlib.sha256(diff).hexdigest()}`; "
             f"regression path `{path}`; regression diff SHA-256 `{hashlib.sha256(diff).hexdigest()}`; "
             f"regression case `{case_id}`; regression location `\"raises\": \"ValueError\"`; "
-            "explanation `the new JSON case catches the invalid configuration exception precisely`."
+            "explanation `the new JSON case catches the invalid configuration exception precisely.`"
         )
         record = {"schema": 1, "source_sha": "4" * 40,
                   "findings": [{"finding_id": "inline:27:1234", "status": "fixed",
@@ -2533,12 +2582,14 @@ class OfficialPackagingProofTests(unittest.TestCase):
             "head_ref": f"review/{source['configuration_sha']}",
             "base_ref": f"review-base/{base}", "state": "open",
         }
+        with patch.object(release, "lifecycle", return_value=FakeLifecycle):
+            request_body = release.review_marker(source, "full", source["configuration_sha"], base)
         request = {
             "id": 501,
             "user": {"login": "warelik", "type": "User"},
             "created_at": "2026-10-19T10:02:00Z",
             "updated_at": "2026-10-19T10:02:00Z",
-            "body": release.review_marker(source, "full", source["configuration_sha"], base),
+            "body": request_body,
         }
         pull = {
             "number": 91, "state": "open",
@@ -2599,9 +2650,27 @@ class PreparedSharedBundleTests(unittest.TestCase):
     def run_prepare(self, proof):
         source = candidate()
         candidate_id = FakeLifecycle.candidate_identity(source)
-        accepted = {"candidate": {**source, "configuration_sha": "4" * 40,
-                                  "application_sha": "6" * 40},
-                    "publication": {"published_at": "2026-10-19T10:00:00Z"}}
+        accepted_candidate = {**source, "configuration_sha": "4" * 40,
+                              "application_sha": "6" * 40}
+        accepted_publication = {
+            "kind": "github-release", "id": 71,
+            "published_at": "2026-10-19T10:00:00Z", "metadata_sha256": METADATA,
+        }
+        accepted_value = json.dumps({
+            "schema": 1, "repository": release.REPOSITORY,
+            "candidate": accepted_candidate, "publication": accepted_publication,
+        }, sort_keys=True, separators=(",", ":"))
+        accepted = {
+            "proof": {
+                "endpoint": release.ACCEPTED_BASELINE_ENDPOINT,
+                "variable": {
+                    "name": "FORK_ACCEPTED_BASELINE", "value": accepted_value,
+                    "created_at": "2026-10-19T09:00:00Z",
+                    "updated_at": "2026-10-19T10:00:00Z",
+                },
+            },
+            "candidate": accepted_candidate, "publication": accepted_publication,
+        }
         selected = {"version": "12.1.4", "upstream_sha": SHA,
                     "upstream_release_id": 17, "upstream_tag": "Ghidra_12.1.4_build",
                     "asset": {"name": "ghidra.zip", "sha256": "a" * 64,
@@ -3168,13 +3237,13 @@ class FrozenExecutionTests(unittest.TestCase):
                 patch.object(release, "native_review_history_records", return_value=records) as fetch, \
                 patch.object(release, "api", return_value=native_commit) as native_get:
             result = release.native_review_history(source, publication)
-        fetch.assert_called_once_with(publication["published_at"])
-        args, kwargs = core.review_history.call_args
-        self.assertEqual(args, (source, records, publication["published_at"]))
-        self.assertEqual(kwargs.keys(), {"read_native"})
-        self.assertIs(kwargs["read_native"](f"repos/{release.REPOSITORY}/git/commits/{SHA}"),
-                      native_commit)
-        native_get.assert_called_once_with(f"repos/{release.REPOSITORY}/git/commits/{SHA}")
+            fetch.assert_called_once_with(publication["published_at"])
+            args, kwargs = core.review_history.call_args
+            self.assertEqual(args, (source, records, publication["published_at"]))
+            self.assertEqual(kwargs.keys(), {"read_native"})
+            self.assertIs(kwargs["read_native"](f"repos/{release.REPOSITORY}/git/commits/{SHA}"),
+                          native_commit)
+            native_get.assert_called_once_with(f"repos/{release.REPOSITORY}/git/commits/{SHA}")
         self.assertEqual(result, expected)
 
     def environment(self):

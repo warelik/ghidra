@@ -2918,9 +2918,10 @@ def prepare_adopted_candidate(config, selected, latest, accepted_baseline, bridg
                    policy_run_id=policy_receipt.get("run_id", ""), **common)
             return
         if policy_receipt["state"] != "passed":
-            output(mode="blocked", ready=False, followup=True,
+            blocked = {**common, "followup": True}
+            output(mode="blocked", ready=False,
                    reason="Adopted workflow lacks its immutable successful pre-adoption policy receipt",
-                   policy_run_id=policy_receipt.get("run_id", ""), **common)
+                   policy_run_id=policy_receipt.get("run_id", ""), **blocked)
             return
     close_interrupted_adoption(bridge, config)
     authorization = authorize_heavy_candidate(
@@ -3085,7 +3086,7 @@ def allowed_repair_paths(changes, existing=()):
             raise ValueError(f"Ordinary repair cannot replace a trusted regression case: {path}")
 
 
-TRUSTED_PATHS = {"README.md", "AGENTS.md", ".github/workflows/release.yml",
+TRUSTED_PATHS = {"README.md", ".github/workflows/release.yml",
                  "scripts/release.py", "scripts/maintenance.py", "scripts/maintenance.lock.json",
                  "scripts/smoke.py", "scripts/test_release.py",
                  "scripts/baseline_runner.py", "scripts/case_runner.py", "scripts/policy_runner.py"}

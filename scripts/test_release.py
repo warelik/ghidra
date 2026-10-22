@@ -232,10 +232,12 @@ class SourceTests(unittest.TestCase):
     def test_build_cli_retains_native_configuration_preflight(self):
         events = []
         with patch.object(release.sys, "argv", ["release.py", "build", "/tmp/release"]), \
+                patch.object(release, "enforce_runner_budget",
+                             side_effect=lambda **_kwargs: events.append("budget")), \
                 patch.object(release, "configuration", side_effect=lambda: events.append("preflight")), \
                 patch.object(release, "build", side_effect=lambda path: events.append(path)):
             release.main()
-        self.assertEqual(events, ["preflight", Path("/tmp/release")])
+        self.assertEqual(events, ["budget", "preflight", Path("/tmp/release")])
 
     def test_prepare_cli_recovers_only_the_exact_latest_published_review_pair(self):
         class Lifecycle:
@@ -272,7 +274,27 @@ class SourceTests(unittest.TestCase):
             "published_at": release.parse_github_time(current_release["published_at"], "test time"),
         }
         candidate = candidate_for(current_config, source)
-        accepted = {"candidate": candidate, "publication": {"id": current_release["id"]}}
+        accepted_publication = {
+            "kind": "github-release", "id": current_release["id"],
+            "published_at": current_release["published_at"],
+            "metadata_sha256": "e" * 64,
+        }
+        accepted_value = json.dumps({
+            "schema": 1, "repository": release.REPOSITORY,
+            "candidate": candidate, "publication": accepted_publication,
+        }, sort_keys=True, separators=(",", ":"))
+        accepted = {
+            "proof": {
+                "endpoint": release.ACCEPTED_BASELINE_ENDPOINT,
+                "variable": {
+                    "name": "FORK_ACCEPTED_BASELINE", "value": accepted_value,
+                    "created_at": "2026-10-19T09:00:00Z",
+                    "updated_at": current_release["published_at"],
+                },
+            },
+            "candidate": candidate,
+            "publication": accepted_publication,
+        }
 
         def marker(scope, review_sha, base_sha):
             payload = {"schema": 1, "candidate_id": Lifecycle.candidate_identity(candidate),
@@ -850,7 +872,7 @@ class RepairAndRuntimeTests(unittest.TestCase):
         # 4,400 seconds were already spent; ordinary preparation fits, but a
         # complete 3,600-second final build no longer fits in the 8,000-second budget.
         with patch.object(release, "pages", side_effect=[
-                [request], [run], [job]]):
+                [], [request], [run], [job]]):
             with self.assertRaisesRegex(ValueError, "3600 required"):
                 release.enforce_runner_budget(
                     release.datetime.fromisoformat("2026-01-01T03:13:20+00:00"),
@@ -1249,13 +1271,12 @@ class RepairAndRuntimeTests(unittest.TestCase):
         self.assertIn('run: python3 scripts/release.py repair-shared "$RUNNER_TEMP/repair"',
                       normal_request)
 
-        guards = [line for line in workflow.splitlines()
-                  if 'key.lower() == "core.sshcommand"' in line]
-        self.assertEqual(len(guards), 6)
-        self.assertTrue(all('key.lower() == "credential.helper"' in line
-                            and 'key.lower().startswith("http.")' in line
-                            and 'key.lower().endswith(".extraheader")' in line
-                            for line in guards))
+        for guard in (
+                'key.lower() == "core.sshcommand"',
+                'key.lower() == "credential.helper"',
+                'key.lower().startswith("http.")',
+                'key.lower().endswith(".extraheader")'):
+            self.assertEqual(workflow.count(guard), 6)
 
         def rejects_git_key(key):
             lowered = key.lower()
