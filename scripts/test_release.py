@@ -345,6 +345,8 @@ class SourceTests(unittest.TestCase):
             if route == f"repos/{release.REPOSITORY}/pulls?{open_full_query}":
                 recovery_reads.append(route)
                 return []
+            if route == f"repos/{release.REPOSITORY}/pulls?state=all&base=downstream":
+                return []
             number = int(route.split("/issues/", 1)[1].split("/", 1)[0])
             return comments[number]
 

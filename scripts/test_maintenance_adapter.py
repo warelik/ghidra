@@ -492,16 +492,31 @@ class AcceptedBaselineTests(unittest.TestCase):
         close.reset_mock()
         authorize.reset_mock()
         output.reset_mock()
-        release.prepare_adopted_candidate(
-            adopted, {"upstream_sha": SHA}, {"publication": "latest"},
-            {"accepted": "baseline"}, bridge)
-        self.assertEqual(review.call_count, 2)
-        close.assert_called_once_with(bridge, adopted)
-        authorize.assert_called_once_with(
+        with patch.dict(os.environ, {"GITHUB_RUN_ID": "901", "GITHUB_RUN_ATTEMPT": "2",
+                                     "GITHUB_EVENT_NAME": "push",
+                                     "GITHUB_REF": "refs/heads/downstream",
+                                     "GITHUB_SHA": adopted}), \
+                patch.object(release, "api", return_value={"sha": adopted}), \
+                patch.object(release, "lifecycle", return_value=FakeLifecycle), \
+                patch.object(release, "maintenance_revision_at", return_value="revision"), \
+                patch.object(release, "review_pair_for", return_value=pair) as second_review, \
+                patch.object(release, "verified_shared_bundle", return_value=bundle.return_value), \
+                patch.object(release, "close_interrupted_adoption") as second_close, \
+                patch.object(release, "authorize_heavy_candidate",
+                             return_value=authorization) as second_authorize, \
+                patch.object(release, "output") as second_output:
+            release.prepare_adopted_candidate(
+                adopted, {"upstream_sha": SHA}, {"publication": "latest"},
+                {"accepted": "baseline"}, bridge)
+        second_review.assert_called_once_with(source, reviewed, release.BASELINE,
+                                              pair_record=pair_record, allow_closed=True,
+                                              selection={"upstream_sha": SHA})
+        second_close.assert_called_once_with(bridge, adopted)
+        second_authorize.assert_called_once_with(
             source, {"publication": "latest"}, contexts,
             accepted_baseline={"accepted": "baseline"})
-        self.assertEqual(output.call_args.kwargs["mode"], "build-policy-current")
-        self.assertTrue(output.call_args.kwargs["policy_verified"])
+        self.assertEqual(second_output.call_args.kwargs["mode"], "build-policy-current")
+        self.assertTrue(second_output.call_args.kwargs["policy_verified"])
 
     def test_workflow_adoption_defers_then_runs_build_under_the_adopted_workflow(self):
         reviewed, adopted = "4" * 40, "5" * 40
@@ -884,7 +899,7 @@ class AcceptedBaselineTests(unittest.TestCase):
             "id": comment["id"], "created_at": comment["created_at"],
             "updated_at": comment["updated_at"], "user": native_user,
         })
-        self.assertEqual(release._merge_disposition_records(result, [result]), result)
+        self.assertEqual(release._merge_disposition_records(result, result), result)
         for invalid in ({**comment, "user": {"login": "not-owner", "type": "User"}},
                         {**comment, "updated_at": "2026-10-19T10:01:00Z"}):
             with patch.object(release, "lifecycle", return_value=FakeLifecycle), \
@@ -1364,7 +1379,9 @@ class AcceptedBaselineTests(unittest.TestCase):
                   "repair": {"number": 91}, "repair_head": reviewed,
                   "pair_record": pair_record}
         pair = {**pair_record, "result": {"state": "ready"}}
-        with patch.dict(os.environ, {"GITHUB_RUN_ID": "901", "GITHUB_RUN_ATTEMPT": "2"}), \
+        with patch.dict(os.environ, {"GITHUB_RUN_ID": "901", "GITHUB_RUN_ATTEMPT": "2",
+                                     "GITHUB_REF": "refs/heads/downstream",
+                                     "GITHUB_SHA": adopted}), \
                 patch.object(release, "lifecycle", return_value=FakeLifecycle), \
                 patch.object(release, "maintenance_revision_at", return_value="revision"), \
                 patch.object(release, "api", return_value={"sha": adopted}), \
@@ -1949,6 +1966,8 @@ class RepairDispositionProposalTests(unittest.TestCase):
                  "head": state_head or source["configuration_sha"]}
         findings = [{"finding_id": "inline:27:1234"}]
         entries = iter((f"100644 blob {'5' * 40} scripts/release.py",
+                        f"100644 blob {'6' * 40} scripts/test_release.py",
+                        f"100644 blob {'5' * 40} scripts/release.py",
                         f"100644 blob {'6' * 40} scripts/test_release.py"))
 
         def command(args, **_kwargs):
@@ -2163,12 +2182,12 @@ class RepairDispositionProposalTests(unittest.TestCase):
         def git_command(args, **_kwargs):
             path = args[-1]
             if args[1] == "ls-tree":
-                blob = "5" * 40 if path.endswith("release.py") else "6" * 40
+                blob = "5" * 40 if path == "scripts/release.py" else "6" * 40
                 return f"100644 blob {blob} {path}"
             if args[1] == "show":
-                return (b"def authorize_candidate():\n" if path.endswith("release.py")
+                return (b"def authorize_candidate():\n" if path == "scripts/release.py"
                         else b"def test_failure():\n    assert blocked\n")
-            return (b"+def authorize_candidate():\n" if path.endswith("release.py")
+            return (b"+def authorize_candidate():\n" if path == "scripts/release.py"
                     else b"+def test_failure():\n+    assert blocked\n")
 
         findings_pair = {**pair_record,
