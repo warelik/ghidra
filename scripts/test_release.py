@@ -1388,5 +1388,60 @@ class RepairAndRuntimeTests(unittest.TestCase):
         self.assertIn('.source(str(work / "fixture"))', smoke)
 
 
+class PrivateSourceFailureAfterAdoptionTests(unittest.TestCase):
+    def environment(self):
+        return {"GITHUB_REPOSITORY": release.REPOSITORY, "GITHUB_SHA": SHA,
+                "CONFIGURATION_SHA": SHA, "GITHUB_RUN_ID": "701",
+                "PRIVATE_SOURCE_ACQUISITION_FAILED": "true", "SELECTED_JSON": "{}"}
+
+    def native(self, route):
+        if route == f"repos/{release.REPOSITORY}":
+            return {"default_branch": "downstream"}
+        if route == f"repos/{release.REPOSITORY}/commits/downstream":
+            return {"sha": BASE}
+        raise AssertionError(route)
+
+    def test_stale_callback_reports_private_access_failure_without_private_import(self):
+        with (patch.dict(os.environ, self.environment(), clear=True),
+              patch.object(release, "api", side_effect=self.native),
+              patch.object(release, "configuration", side_effect=AssertionError("strict execution path")) as config,
+              patch.object(release, "lifecycle", side_effect=AssertionError("private import")) as lifecycle,
+              patch.object(release, "selected_source", return_value=selected()),
+              patch.object(release, "private_source_acquisition_evidence", return_value="access failure") as evidence,
+              patch.object(release, "escalation") as report,
+              self.assertRaisesRegex(ValueError, "failure was reported")):
+            release.request_repair_shared(Path("/unused"))
+        config.assert_not_called(); lifecycle.assert_not_called()
+        evidence.assert_called_once_with(release.REPOSITORY, "701")
+        report.assert_called_once_with(BASE, selected(), "access failure")
+
+    def test_exhausted_runner_still_reports_stale_callback_access_failure(self):
+        with (patch.dict(os.environ, self.environment(), clear=True),
+              patch.object(release.sys, "argv", ["release.py", "repair-shared", "/unused"]),
+              patch.object(release, "enforce_runner_budget", side_effect=ValueError("budget exhausted")),
+              patch.object(release, "api", side_effect=self.native),
+              patch.object(release, "configuration", side_effect=AssertionError("strict execution path")),
+              patch.object(release, "lifecycle", side_effect=AssertionError("private import")),
+              patch.object(release, "selected_source", return_value=selected()),
+              patch.object(release, "private_source_acquisition_evidence", return_value="access failure"),
+              patch.object(release, "escalation") as report,
+              self.assertRaisesRegex(ValueError, "budget exhausted")):
+            release.main()
+        self.assertEqual(report.call_args.args[:2], (BASE, selected()))
+        self.assertIn("access failure", report.call_args.args[2])
+        self.assertIn("budget exhausted", report.call_args.args[2])
+
+    def test_reporting_context_refuses_wrong_repo_and_invalid_native_head(self):
+        for env, native in (({"GITHUB_REPOSITORY": "other/repo"}, self.native),
+                            ({}, lambda route: {"default_branch": "downstream", "sha": "invalid"})):
+            with (patch.dict(os.environ, {**self.environment(), **env}, clear=True),
+                  patch.object(release, "api", side_effect=native), self.assertRaises(ValueError)):
+                release.private_source_failure_configuration()
+        with (patch.dict(os.environ, self.environment(), clear=True),
+              patch.object(release, "api", side_effect=self.native),
+              self.assertRaisesRegex(ValueError, "superseded")):
+            release.configuration()
+
+
 if __name__ == "__main__":
     unittest.main()

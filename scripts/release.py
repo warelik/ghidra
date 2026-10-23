@@ -4522,6 +4522,20 @@ def private_source_acquisition_evidence(repo, run_id):
             f"Acquisition phase: {phase}.\n\nOriginal workflow failure evidence:\n{original}")
 
 
+def private_source_failure_configuration():
+    """Identify the current public controller for reporting, never for execution."""
+    repo = os.environ["GITHUB_REPOSITORY"]
+    event_sha = os.environ.get("CONFIGURATION_SHA", os.environ["GITHUB_SHA"])
+    if repo != REPOSITORY or not SHA.fullmatch(event_sha):
+        raise ValueError("Unexpected repository or failure-report event identity")
+    if api(f"repos/{repo}")["default_branch"] != "downstream":
+        raise ValueError("The trusted default branch must be downstream")
+    current = api(f"repos/{repo}/commits/downstream").get("sha")
+    if not isinstance(current, str) or not SHA.fullmatch(current):
+        raise ValueError("Private-source failure report has no exact current configuration")
+    return repo, current
+
+
 def request_repair(path):
     # The legacy CLI predates PREPARE_RESULT; preserve its direct-call wait behavior.
     if (os.environ.get("PREPARE_MODE") == "waiting"
@@ -4610,6 +4624,17 @@ def request_repair_shared(path):
     """Route complete paired-review findings or final failures through native repair."""
     prepare_reason = os.environ.get("PREPARE_REASON", "")
     source_acquisition_failed = os.environ.get("PRIVATE_SOURCE_ACQUISITION_FAILED") == "true"
+    if source_acquisition_failed:
+        # A queued issue-comment event can predate a valid adoption. Missing
+        # private access must still be reported; this path authorizes no repair,
+        # adoption, validation or build against that stale event.
+        repo, config = private_source_failure_configuration()
+        selected = selected_source() if os.environ.get("SELECTED_JSON") else select_release()
+        evidence = private_source_acquisition_evidence(
+            repo, os.environ.get("GITHUB_RUN_ID", ""))
+        escalation(config, selected, evidence)
+        raise ValueError("Private maintenance source acquisition failure was reported; "
+                         "verification stopped and the previous release remains available")
     if (not source_acquisition_failed
             and os.environ.get("PREPARE_MODE") == "waiting"
             and prepare_reason != PAIR_FINDINGS
@@ -4618,12 +4643,6 @@ def request_repair_shared(path):
         return
     repo, config = configuration()
     selected = selected_source() if os.environ.get("SELECTED_JSON") else select_release()
-    if source_acquisition_failed:
-        evidence = private_source_acquisition_evidence(
-            repo, os.environ.get("GITHUB_RUN_ID", ""))
-        escalation(config, selected, evidence)
-        raise ValueError("Private maintenance source acquisition failure was reported; "
-                         "verification stopped and the previous release remains available")
     if os.environ.get("PREPARE_MODE") == "reuse":
         escalation(config, selected,
                    "The exact native candidate requires reuse of its prior workflow artifact, but the "
@@ -5383,11 +5402,13 @@ def main():
         try:
             enforce_runner_budget()
         except ValueError as error:
-            repo, config = configuration()
+            private_failure = (args.command == "repair-shared"
+                               and os.environ.get("PRIVATE_SOURCE_ACQUISITION_FAILED") == "true")
+            repo, config = (private_source_failure_configuration() if private_failure
+                            else configuration())
             selected = selected_source() if os.environ.get("SELECTED_JSON") else select_release()
             evidence = str(error)
-            if (args.command == "repair-shared"
-                    and os.environ.get("PRIVATE_SOURCE_ACQUISITION_FAILED") == "true"):
+            if private_failure:
                 evidence = (private_source_acquisition_evidence(
                     repo, os.environ.get("GITHUB_RUN_ID", "")) + "\n\nBounded runner result:\n" + str(error))
             escalation(config, selected, evidence)
