@@ -1293,6 +1293,8 @@ class RepairAndRuntimeTests(unittest.TestCase):
                 self.assertIn("name: Record Private Maintenance Acquisition Result", job)
 
         policy_finish = workflow.split("\n  policy-finish:", 1)[1].split("\n  repair:", 1)[0]
+        finish_permissions = policy_finish.split("\n    permissions:\n", 1)[1].split("\n    steps:", 1)[0]
+        self.assertIn("      actions: read", finish_permissions)
         self.assertIn("private_source_failed: ${{ steps.private-source-result.outputs.failed }}", policy_finish)
         self.assertIn("private_source_failure_reason: ${{ steps.private-source-result.outputs.reason }}", policy_finish)
         self.assertNotIn("Report Private Maintenance Acquisition Failure", policy_finish)
