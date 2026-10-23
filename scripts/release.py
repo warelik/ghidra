@@ -2069,7 +2069,7 @@ def _verify_policy_comment_snapshot(pr, comment):
 
 
 def policy_migration_receipt(candidate, contexts, *, allow_current_attempt=False,
-                             require_immutable=False):
+                             require_immutable=True):
     candidate_id = lifecycle().candidate_identity(candidate)
     full = next((context for context in contexts if context.get("scope") == "full"), None)
     if full is None:

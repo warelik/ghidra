@@ -1107,7 +1107,9 @@ class AcceptedBaselineTests(unittest.TestCase):
             "workflow_sha": "6" * 40,
             "review_contexts": release.paired_context_ids(contexts),
         }
-        comment = {"user": {"login": "warelik", "type": "User"},
+        comment = {"id": 700, "created_at": "2026-10-19T09:00:00Z",
+                   "updated_at": "2026-10-19T09:00:00Z",
+                   "user": {"login": "warelik", "type": "User"},
                    "body": "<!-- fork-policy-attempt:v1 "
                            + json.dumps(marker, sort_keys=True, separators=(",", ":")) + " -->"}
         native_run = {"id": marker["run_id"], "run_attempt": marker["run_attempt"],
@@ -1136,7 +1138,8 @@ class AcceptedBaselineTests(unittest.TestCase):
         comments = []
         for attempt in (1,):
             marker = {**base, "run_attempt": attempt}
-            comments.append({"id": 700 + attempt, "user": {"login": "warelik", "type": "User"},
+            comments.append({"id": 700 + attempt, "created_at": "2026-10-19T09:00:00Z",
+                             "updated_at": "2026-10-19T09:00:00Z", "user": {"login": "warelik", "type": "User"},
                              "body": "<!-- fork-policy-attempt:v1 "
                                      + json.dumps(marker, sort_keys=True, separators=(",", ":"))
                                      + " -->"})
@@ -1152,7 +1155,8 @@ class AcceptedBaselineTests(unittest.TestCase):
                           "head_sha": base["workflow_sha"], "status": "completed",
                           "conclusion": "success"}
         policy_job = {"name": release.POLICY_JOB_NAME, "status": "completed",
-                      "conclusion": "success"}
+                      "conclusion": "success", "started_at": "2026-10-19T09:01:00Z",
+                      "completed_at": "2026-10-19T09:02:00Z"}
         routes = []
 
         def pages(path, *, list_field=None):
@@ -1163,9 +1167,16 @@ class AcceptedBaselineTests(unittest.TestCase):
                 return [policy_job]
             raise AssertionError(f"unexpected native request: {path}")
 
+        api = Mock(return_value=native_attempt)
+
+        def read_native(route, **kwargs):
+            if "/issues/comments/" in route:
+                return dict(next(c for c in comments if c["id"] == int(route.rsplit("/", 1)[1])))
+            return api(route, **kwargs)
+
         with patch.object(release, "lifecycle", return_value=FakeLifecycle), \
                 patch.object(release, "pages", side_effect=pages), \
-                patch.object(release, "api", return_value=native_attempt) as api, \
+                patch.object(release, "api", side_effect=read_native), \
                 patch.object(release, "validate_native_workflow_source", return_value=True):
             result = release.policy_migration_receipt(source, contexts)
             self.assertEqual(result["state"], "passed")
@@ -1187,7 +1198,8 @@ class AcceptedBaselineTests(unittest.TestCase):
         base = {"schema": 1, "candidate_id": FakeLifecycle.candidate_identity(source),
                 "candidate": source, "run_id": 800, "workflow_sha": "6" * 40,
                 "review_contexts": release.paired_context_ids(contexts)}
-        comments = [{"id": 700 + attempt, "user": {"login": "warelik", "type": "User"},
+        comments = [{"id": 700 + attempt, "created_at": "2026-10-19T09:00:00Z",
+                     "updated_at": "2026-10-19T09:00:00Z", "user": {"login": "warelik", "type": "User"},
                      "body": "<!-- fork-policy-attempt:v1 "
                              + json.dumps({**base, "run_attempt": attempt}, sort_keys=True,
                                           separators=(",", ":")) + " -->"}
@@ -1197,9 +1209,11 @@ class AcceptedBaselineTests(unittest.TestCase):
                           "status": "completed", "conclusion": conclusion}
                 for attempt, conclusion in ((1, "success"), (2, "failure"))}
         jobs = {1: [{"name": release.POLICY_JOB_NAME, "status": "completed",
-                     "conclusion": "success"}],
+                     "conclusion": "success", "started_at": "2026-10-19T09:01:00Z",
+                     "completed_at": "2026-10-19T09:02:00Z"}],
                 2: [{"name": release.POLICY_JOB_NAME, "status": "completed",
-                     "conclusion": "failure"}]}
+                     "conclusion": "failure", "started_at": "2026-10-19T09:03:00Z",
+                     "completed_at": "2026-10-19T09:04:00Z"}]}
 
         def pages(path, *, list_field=None):
             if path.endswith("/issues/91/comments"):
@@ -1208,9 +1222,14 @@ class AcceptedBaselineTests(unittest.TestCase):
                 return jobs[int(path.split("/attempts/")[1].split("/")[0])]
             raise AssertionError(f"unexpected native request: {path}")
 
+        def read_native(route):
+            if "/issues/comments/" in route:
+                return dict(next(c for c in comments if c["id"] == int(route.rsplit("/", 1)[1])))
+            return runs[int(route.rsplit("/", 1)[1])]
+
         with patch.object(release, "lifecycle", return_value=FakeLifecycle), \
                 patch.object(release, "pages", side_effect=pages), \
-                patch.object(release, "api", side_effect=lambda route: runs[int(route.rsplit("/", 1)[1])]), \
+                patch.object(release, "api", side_effect=read_native), \
                 patch.object(release, "validate_native_workflow_source", return_value=True):
             receipt = release.policy_migration_receipt(source, contexts)
         self.assertEqual(receipt["state"], "failed")
@@ -1337,6 +1356,8 @@ class AcceptedBaselineTests(unittest.TestCase):
         }
         heavy_job = {"name": release.FINAL_HEAVY_JOB, "status": "queued", "steps": []}
 
+        reread_changes = {}
+
         def pages(path, *, list_field=None):
             if path.endswith("/issues/91/comments"):
                 return [comment]
@@ -1348,7 +1369,7 @@ class AcceptedBaselineTests(unittest.TestCase):
             if path.endswith("/attempts/1"):
                 return native_run
             if path.endswith("/issues/comments/700"):
-                return dict(comment)
+                return dict(comment, **reread_changes)
             raise AssertionError(path)
 
         def receipt():
@@ -1357,11 +1378,26 @@ class AcceptedBaselineTests(unittest.TestCase):
                     patch.object(release, "api", side_effect=api), \
                     patch.object(release, "validate_native_workflow_source", return_value=True):
                 return release.policy_migration_receipt(
-                    source, contexts, require_immutable=True)
+                    source, contexts)
 
         passed = receipt()
         self.assertEqual(passed["state"], "passed")
         self.assertEqual(native_run["conclusion"], "failure")
+
+        original_times = {key: comment[key] for key in ("created_at", "updated_at")}
+        comment["updated_at"] = "2026-10-19T09:00:01Z"
+        with self.assertRaisesRegex(ValueError, "edited or lacks a positive immutable ID"):
+            receipt()
+        comment.update(original_times)
+        comment.update(created_at="2026-10-19T09:02:30Z", updated_at="2026-10-19T09:02:30Z")
+        with self.assertRaisesRegex(ValueError, "does not precede"):
+            receipt()
+        comment.update(original_times)
+        reread_changes["body"] = comment["body"] + " edited after validation"
+        with self.assertRaisesRegex(ValueError, "changed during completion verification"):
+            receipt()
+        reread_changes.clear()
+
 
         reviewed, adopted = source["configuration_sha"], "5" * 40
         source["configuration_sha"] = reviewed
