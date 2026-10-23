@@ -791,7 +791,26 @@ jobs:
         env:
           FORK_MAINTENANCE_ROOT: ${{ github.workspace }}/maintenance-source
         run: python3 -B -c "import sys; sys.path.insert(0, 'scripts'); from maintenance import load; load()"
+      - name: Read Current Public Controller For Private Acquisition Failure
+        id: failure-controller
+        if: >-
+          always() &&
+          (needs.prepare.outputs.private_source_failed == 'true' ||
+           needs.policy-check.outputs.private_source_failed == 'true' ||
+           needs.publish.outputs.private_source_failed == 'true' ||
+           needs.land.outputs.private_source_failed == 'true' ||
+           needs.policy-finish.outputs.private_source_failed == 'true' ||
+           steps.private-source.outcome == 'failure' ||
+           steps.private-checkout.outcome == 'failure' ||
+           steps.verify-private-checkout.outcome == 'failure' ||
+           steps.verify-shared-policy.outcome == 'failure')
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: downstream
+          path: failure-controller
+          persist-credentials: false
       - name: Report Private Maintenance Acquisition Failure
+        working-directory: failure-controller
         if: >-
           always() &&
           (needs.prepare.outputs.private_source_failed == 'true' ||

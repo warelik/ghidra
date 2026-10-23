@@ -1321,8 +1321,23 @@ class RepairAndRuntimeTests(unittest.TestCase):
         verify_private = repair.split("id: verify-private-checkout", 1)[1].split("\n      -", 1)[0]
         self.assertIn("SOURCE_REVISION: ${{ steps.private-source.outputs.revision }}", verify_private)
         self.assertNotIn("trusted_maintenance_revision", repair)
+        failure_controller = repair.split(
+            "name: Read Current Public Controller For Private Acquisition Failure", 1)[1].split(
+            "\n      -", 1)[0]
+        self.assertIn("always()", failure_controller)
+        self.assertIn("ref: downstream", failure_controller)
+        self.assertIn("path: failure-controller", failure_controller)
+        self.assertIn("persist-credentials: false", failure_controller)
+        self.assertNotIn("ssh-key:", failure_controller)
+        for job in ("prepare", "policy-check", "publish", "land", "policy-finish"):
+            self.assertIn(f"needs.{job}.outputs.private_source_failed == 'true'", failure_controller)
+        for step in ("private-source", "private-checkout", "verify-private-checkout", "verify-shared-policy"):
+            self.assertIn(f"steps.{step}.outcome == 'failure'", failure_controller)
+        self.assertLess(repair.index("id: failure-controller"),
+                        repair.index("name: Report Private Maintenance Acquisition Failure"))
         report = repair.split("name: Report Private Maintenance Acquisition Failure", 1)[1].split(
             "\n      -", 1)[0]
+        self.assertIn("working-directory: failure-controller", report)
         self.assertIn("always()", report)
         for job in ("prepare", "policy-check", "publish", "land", "policy-finish"):
             self.assertIn(f"needs.{job}.outputs.private_source_failed == 'true'", report)
