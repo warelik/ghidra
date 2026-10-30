@@ -41,6 +41,43 @@ class FakeLifecycle:
         return target
 
 
+class ReviewModeTests(unittest.TestCase):
+    def test_none_posts_exact_owner_acceptance_once_without_trigger(self):
+        request = {"id": 7, "created_at": "2026-10-19T09:00:00Z"}
+        with patch.dict(release.os.environ, {"FORK_REVIEW_MODE": "none"}), \
+                patch.object(release, "lifecycle", return_value=FakeLifecycle), \
+                patch.object(release, "owner_identity"), \
+                patch.object(release, "api", return_value={"id": 8}) as api:
+            self.assertTrue(release._ensure_owner_acceptance(
+                candidate(), "full", 7, request, SHA, "2" * 40, []))
+            self.assertFalse(release.paired_review_prompt(
+                candidate(), "full", SHA, "2" * 40, "marker", "selection").startswith("@codex"))
+        body = api.call_args.kwargs["data"]["body"]
+        self.assertIn('"request_id":7', body)
+        with patch.dict(release.os.environ, {"FORK_REVIEW_MODE": "none"}), \
+                patch.object(release, "lifecycle", return_value=FakeLifecycle), \
+                patch.object(release, "api") as duplicate:
+            self.assertFalse(release._ensure_owner_acceptance(
+                candidate(), "full", 7, request, SHA, "2" * 40,
+                [{"body": body, "user": {"login": "warelik", "type": "User"}}]))
+        duplicate.assert_not_called()
+
+    def test_bot_keeps_configured_trigger_without_acceptance(self):
+        with patch.dict(release.os.environ, {
+                "FORK_REVIEW_MODE": "bot", "FORK_REVIEW_TRIGGER": "@reviewer review"}):
+            self.assertTrue(release.paired_review_prompt(
+                candidate(), "delta", SHA, "2" * 40, "marker", "selection"
+            ).startswith("@reviewer review\n\n"))
+            with patch.object(release, "api") as api:
+                self.assertFalse(release._ensure_owner_acceptance(
+                    candidate(), "delta", 7,
+                    {"id": 7, "created_at": "2026-10-19T09:00:00Z"}, SHA, "2" * 40, []))
+            api.assert_not_called()
+        with patch.dict(release.os.environ, {"FORK_REVIEW_MODE": "sometimes"}), \
+                self.assertRaisesRegex(ValueError, "FORK_REVIEW_MODE"):
+            release.review_mode()
+
+
 class AcceptedBaselineTests(unittest.TestCase):
     def publication(self):
         release_record = {

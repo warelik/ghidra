@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 from urllib.parse import urlencode
 from urllib.request import urlopen
 import zipfile
@@ -31,6 +32,8 @@ PUBLISHED_REVIEW_PAIR = re.compile(
     rf"delta review: https://github\.com/{re.escape(REPOSITORY)}/pull/([1-9][0-9]*)\.$")
 BOT = "chatgpt-codex-connector[bot]"
 APP = "chatgpt-codex-connector"
+REVIEW_MODES = {"bot", "owner", "none"}
+OWNER_ACCEPTANCE_AUTHORIZATION_SHA256 = "3343e4d2dfc5a06b529fe32b352bfc0b798539c8454d02f60d9cae3ccd5cc7b0"
 SEVERITY = re.compile(r"\bP[01]\b|\b(?:critical|high)\s+severity\b", re.I)
 MINOR = re.compile(r"\bP[23]\b")
 REVIEWED = re.compile(r"(?im)^.*?Reviewed commit[^0-9a-f]*`?([0-9a-f]{7,40})`?\s*\*{0,2}\s*$")
@@ -501,7 +504,7 @@ def review_gate(sha, requested_at, reviews, inline, comments, resolve):
 
 def review_prompt(sha, base):
     return (
-        "@codex review\n\n"
+        review_trigger_prefix() +
         f"Review the complete packaging and release-policy diff at exact commit `{sha}`, "
         f"against `{base}` in `{REPOSITORY}`.\n"
         "This fork packages the unmodified official Ghidra distribution for headless PyGhidra use. "
@@ -590,6 +593,56 @@ def review_marker(candidate, scope, review_sha, base_sha):
         "base_sha": base_sha,
     }
     return "<!-- fork-review:v1 " + json.dumps(payload, sort_keys=True, separators=(",", ":")) + " -->"
+
+
+def review_mode():
+    mode = os.environ.get("FORK_REVIEW_MODE", "bot").strip().lower()
+    if mode not in REVIEW_MODES:
+        raise ValueError("FORK_REVIEW_MODE must be bot, owner or none")
+    return mode
+
+
+def review_trigger_prefix():
+    if review_mode() not in {"bot", "owner"}:
+        return ""
+    trigger = os.environ.get("FORK_REVIEW_TRIGGER", "@codex review").strip()
+    return trigger + "\n\n" if trigger else ""
+
+
+def _owner_acceptance_body(candidate, scope, number, request, review_sha, base_sha):
+    value = {
+        "schema": 1,
+        "authorization_sha256": OWNER_ACCEPTANCE_AUTHORIZATION_SHA256,
+        "repository": candidate["repository"],
+        "pr": number,
+        "request_id": request["id"],
+        "scope": scope,
+        "review_sha": review_sha,
+        "base_sha": base_sha,
+        "candidate_id": lifecycle().candidate_identity(candidate),
+    }
+    return ("<!-- machine-maintenance-owner-acceptance:v1 "
+            + json.dumps(value, separators=(",", ":")) + " -->")
+
+
+def _ensure_owner_acceptance(candidate, scope, number, request, review_sha, base_sha, comments):
+    if review_mode() != "none":
+        return False
+    repo = candidate["repository"]
+    owner = repo.split("/", 1)[0]
+    body = _owner_acceptance_body(candidate, scope, number, request, review_sha, base_sha)
+    if any(comment.get("body") == body
+           and comment.get("user", {}).get("login") == owner
+           and comment.get("user", {}).get("type") == "User" for comment in comments):
+        return False
+    requested_at = parse_github_time(request.get("created_at"), "owner review request creation")
+    wait = (requested_at + timedelta(seconds=1) - datetime.now(timezone.utc)).total_seconds()
+    if wait > 0:
+        time.sleep(wait + 0.1)
+    owner_identity()
+    api(f"repos/{repo}/issues/{number}/comments", method="POST", owner=True,
+        data={"body": body})
+    return True
 
 
 def review_selection_marker(candidate, selected, accepted_baseline, scope, review_sha, base_sha):
@@ -748,7 +801,7 @@ def paired_review_prompt(candidate, scope, review_sha, base_sha, marker, selecti
     else:
         description = "Review every packaging configuration change since the last verified shipped configuration."
     return (
-        "@codex review\n\n"
+        review_trigger_prefix() +
         f"{description} Candidate `{review_sha}` is for `{REPOSITORY}` and exact upstream "
         f"`{UPSTREAM}@{candidate['upstream_sha']}`; compare the native PR base `{base_sha}`. "
         "The official Ghidra application is unmodified and its patch-set digest is empty. "
@@ -934,7 +987,8 @@ def native_review_dismissal_events(repo, pr_number, review_sha, reviews):
     return []
 
 
-def review_context_result(candidate, context, *, allow_closed=False, selection=None):
+def review_context_result(candidate, context, *, allow_closed=False, selection=None,
+                          _acceptance_attempted=False):
     module = lifecycle()
     if context.get("scope") == "full":
         coverage = "official-packaging"
@@ -979,6 +1033,12 @@ def review_context_result(candidate, context, *, allow_closed=False, selection=N
         raise ValueError("Frozen native review context lacks its exact owner request ID")
     if request_id != request["id"]:
         raise ValueError("Frozen native review request ID differs from the latest exact owner request")
+    if not _acceptance_attempted and _ensure_owner_acceptance(
+            candidate, context["scope"], context["pr"], request,
+            context["review_sha"], context["base_sha"], comments):
+        return review_context_result(
+            candidate, context, allow_closed=allow_closed, selection=selection,
+            _acceptance_attempted=True)
     native_commit = api(f"repos/{REPOSITORY}/git/commits/{context['base_sha']}")
     if native_commit.get("sha") != context["base_sha"]:
         raise ValueError(f"Native {context['scope']} review base commit identity mismatch")

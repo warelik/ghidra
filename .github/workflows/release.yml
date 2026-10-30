@@ -15,6 +15,10 @@ on:
 permissions:
   contents: read
 
+env:
+  FORK_REVIEW_MODE: ${{ vars.FORK_REVIEW_MODE || 'bot' }}
+  FORK_REVIEW_TRIGGER: ${{ vars.FORK_REVIEW_TRIGGER || '@codex review' }}
+
 concurrency:
   group: >-
     ${{ ((github.event_name != 'issue_comment' &&
