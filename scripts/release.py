@@ -3449,8 +3449,21 @@ def prepare_shared(path):
         raise ValueError("Invalid upstream mirror commit")
     mirror = commit_ref(repo, "heads/master")
     if mirror != upstream_master:
-        api(f"repos/{repo}/git/refs/heads/master", method="PATCH",
-            data={"sha": upstream_master, "force": False})
+        # This repository is not a fork, so upstream objects are not shared
+        # through a fork network and the ref cannot be patched by API alone:
+        # fetch the exact upstream history and push the fast-forward update.
+        if run("git", "rev-parse", "--is-shallow-repository", cwd=ROOT) == "true":
+            run("git", "fetch", "--no-tags", "--unshallow", "origin", cwd=ROOT)
+        run("git", "fetch", "--no-tags", f"https://github.com/{UPSTREAM}.git",
+            "+refs/heads/master:refs/remotes/upstream/master", cwd=ROOT)
+        if run("git", "rev-parse", "refs/remotes/upstream/master", cwd=ROOT) != upstream_master:
+            raise ValueError("Fetched upstream master does not match the exact mirror commit")
+        push_env = {**os.environ, "GIT_CONFIG_COUNT": "1",
+                    "GIT_CONFIG_KEY_0": "credential.helper",
+                    "GIT_CONFIG_VALUE_0": "!gh auth git-credential",
+                    "GIT_TERMINAL_PROMPT": "0"}
+        run("git", "push", "origin", f"{upstream_master}:refs/heads/master",
+            cwd=ROOT, env=push_env)
     packaging_base(config)
     tag = release_tag(selected, config)
     exact_release = next((record for record in publications
