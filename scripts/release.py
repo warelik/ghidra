@@ -631,7 +631,7 @@ def _owner_acceptance_body(candidate, scope, number, request, review_sha, base_s
         "candidate_id": lifecycle().candidate_identity(candidate),
     }
     return ("<!-- machine-maintenance-owner-acceptance:v1 "
-            + json.dumps(value, separators=(",", ":")) + " -->")
+            + json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + " -->")
 
 
 def _ensure_owner_acceptance(candidate, scope, number, request, review_sha, base_sha, comments):

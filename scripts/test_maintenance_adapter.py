@@ -53,6 +53,11 @@ class ReviewModeTests(unittest.TestCase):
             self.assertFalse(release.paired_review_prompt(
                 candidate(), "full", SHA, "2" * 40, "marker", "selection").startswith("@codex"))
         body = api.call_args.kwargs["data"]["body"]
+        payload = body.removeprefix(
+            "<!-- machine-maintenance-owner-acceptance:v1 ").removesuffix(" -->")
+        self.assertEqual(payload, json.dumps(
+            json.loads(payload), ensure_ascii=False, sort_keys=True,
+            separators=(",", ":")))
         self.assertIn('"request_id":7', body)
         with patch.dict(release.os.environ, {"FORK_REVIEW_MODE": "none"}), \
                 patch.object(release, "lifecycle", return_value=FakeLifecycle), \
