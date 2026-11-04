@@ -1165,25 +1165,33 @@ def native_pull_inventory_signature(pulls):
 
 
 def recent_native_pull_inventory(cutoff):
-    """Read a bounded, updated-time-ordered inventory through the publication cutoff."""
+    """Read a bounded inventory through the publication cutoff without trusting native order.
+
+    The native list is requested with ``sort=updated&direction=desc`` only as a
+    stable pagination cursor: GitHub may keep serving a stale list index after an
+    issue comment bumps a pull request's ``updated_at``, so the returned order is
+    never assumed to be monotonic and a batch below the cutoff never ends
+    pagination. Bounded pages are read until a short final batch, entries at or
+    after the cutoff are collected, and the result is ordered locally by update
+    time then pull-request number, both descending, so signature comparison stays
+    deterministic.
+    """
     route = f"repos/{REPOSITORY}/pulls?state=all&sort=updated&direction=desc"
-    result, previous = [], None
+    result = []
     for page in range(1, 1001):
         batch = api(f"{route}&per_page=100&page={page}")
         if not isinstance(batch, list):
             raise ValueError("Native pull-request history is not a complete list")
-        timestamps = []
         for pull in batch:
-            if not isinstance(pull, dict):
+            if (not isinstance(pull, dict) or type(pull.get("number")) is not int
+                    or pull["number"] <= 0):
                 raise ValueError("Native pull-request history contains a malformed entry")
-            timestamp = parse_github_time(pull.get("updated_at"), "downstream pull update time")
-            if previous is not None and timestamp > previous:
-                raise ValueError("Native pull-request history is not in stable updated-time order")
-            previous = timestamp
-            timestamps.append(timestamp)
-            if timestamp >= cutoff:
+            if parse_github_time(pull.get("updated_at"), "downstream pull update time") >= cutoff:
                 result.append(pull)
-        if any(timestamp < cutoff for timestamp in timestamps) or len(batch) < 100:
+        if len(batch) < 100:
+            result.sort(key=lambda entry: (
+                parse_github_time(entry["updated_at"], "downstream pull update time"),
+                entry["number"]), reverse=True)
             return result
     raise ValueError("Native pull-request history exceeded its pagination bound")
 

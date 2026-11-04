@@ -635,6 +635,40 @@ class ReviewTests(unittest.TestCase):
             with patch.object(release, "api", return_value=response), self.assertRaises(ValueError):
                 release.packaging_base(SHA)
 
+    def test_out_of_order_one_page_inventory_is_filtered_and_locally_sorted(self):
+        cutoff = release.parse_github_time("2026-01-03T00:00:00Z", "test cutoff")
+
+        def pull(number, updated_at):
+            return {"number": number, "updated_at": updated_at, "state": "open",
+                    "head": {"sha": SHA, "repo": {"full_name": release.REPOSITORY}}}
+
+        # GitHub may serve a stale list index: the newest updated_at is not
+        # first, equal timestamps appear out of number order, and one entry sits
+        # below the cutoff in the middle of the page.
+        batch = [pull(2, "2026-01-04T00:00:00Z"),
+                 pull(1, "2026-01-05T00:00:00Z"),
+                 pull(3, "2026-01-02T00:00:00Z"),
+                 pull(4, "2026-01-04T12:00:00Z"),
+                 pull(5, "2026-01-04T00:00:00Z")]
+        calls = []
+
+        def api(route):
+            calls.append(route)
+            return list(batch)
+
+        with patch.object(release, "api", side_effect=api):
+            result = release.recent_native_pull_inventory(cutoff)
+
+        # One short page is enough; pagination does not early-stop on order.
+        self.assertEqual(calls, [f"repos/{release.REPOSITORY}/pulls?state=all"
+                                 "&sort=updated&direction=desc&per_page=100&page=1"])
+        # The below-cutoff entry is dropped; the rest are returned in the local
+        # deterministic order: updated_at descending, then number descending.
+        self.assertEqual([entry["number"] for entry in result], [1, 4, 5, 2])
+        self.assertEqual([entry["updated_at"] for entry in result],
+                         ["2026-01-05T00:00:00Z", "2026-01-04T12:00:00Z",
+                          "2026-01-04T00:00:00Z", "2026-01-04T00:00:00Z"])
+
 
 class RepairAndRuntimeTests(unittest.TestCase):
     def test_only_verified_publication_resets_runner_cycle(self):
